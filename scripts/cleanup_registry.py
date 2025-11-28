@@ -71,16 +71,43 @@ class RegistryCleanup:
             raise
 
     def list_repositories(self) -> List[str]:
-        """List all repositories in the registry."""
+        """List all repositories in the registry with pagination support."""
         print("\n📋 Listing all repositories...")
+        all_repositories = []
+        last_repo = None
+
         try:
-            response = self._make_request('GET', '/_catalog')
-            data = response.json()
-            repositories = data.get('repositories', [])
-            print(f"✓ Found {len(repositories)} repositories")
-            return repositories
+            while True:
+                # Build URL with pagination
+                if last_repo:
+                    path = f'/_catalog?last={last_repo}&n=100'
+                else:
+                    path = '/_catalog?n=100'
+
+                response = self._make_request('GET', path)
+                data = response.json()
+                repositories = data.get('repositories', [])
+
+                if not repositories:
+                    break
+
+                all_repositories.extend(repositories)
+
+                # Check if there are more pages
+                # If we got fewer than requested, we're done
+                if len(repositories) < 100:
+                    break
+
+                last_repo = repositories[-1]
+
+            print(f"✓ Found {len(all_repositories)} repositories")
+            return all_repositories
         except Exception as e:
             print(f"❌ Failed to list repositories: {e}")
+            # Return what we got so far
+            if all_repositories:
+                print(f"⚠ Returning {len(all_repositories)} repositories fetched before error")
+                return all_repositories
             return []
 
     def list_tags(self, repository: str) -> List[str]:
@@ -157,6 +184,7 @@ class RegistryCleanup:
 
         tags = self.list_tags(repository)
         if not tags:
+            print(f"  ℹ️  Repository is empty (no tags found)")
             return 0, 0
 
         deleted_count = 0
@@ -214,17 +242,27 @@ class RegistryCleanup:
         results = {}
         total_deleted = 0
         total_failed = 0
+        empty_repos = 0
 
         for repo in matching_repos:
             deleted, failed = self.cleanup_repository(repo)
             results[repo] = (deleted, failed)
             total_deleted += deleted
             total_failed += failed
+            if deleted == 0 and failed == 0:
+                empty_repos += 1
 
         print(f"\n📊 TOTAL SUMMARY:")
         print(f"  Repositories processed: {len(matching_repos)}")
+        print(f"  Empty repositories (no tags): {empty_repos}")
         print(f"  Images deleted: {total_deleted}")
         print(f"  Failed deletions: {total_failed}")
+
+        if empty_repos > 0:
+            print(f"\n💡 Found {empty_repos} empty repository entries in the catalog.")
+            print(f"   These are leftover catalog entries after manifests were deleted.")
+            print(f"   Run registry garbage collection to remove them:")
+            print(f"   docker exec <registry-container> registry garbage-collect /etc/docker/registry/config.yml")
 
         return results
 
@@ -348,9 +386,21 @@ Examples:
             deleted, failed = cleanup.cleanup_repository(args.repository)
             print(f"\n📊 SUMMARY: {deleted} deleted, {failed} failed")
 
-        if not args.dry_run and (args.pattern or args.repository):
-            print(f"\n💡 Remember to run garbage collection on your registry to free disk space:")
-            print(f"   docker exec <registry_container> /bin/registry garbage-collect /etc/docker/registry/config.yml")
+        # Always show garbage collection instructions (for both dry-run and actual cleanup)
+        if args.pattern or args.repository:
+            print(f"\n" + "="*70)
+            print(f"📋 NEXT STEP: Run Registry Garbage Collection")
+            print(f"="*70)
+            print(f"\nTo remove empty catalog entries and free disk space, run garbage")
+            print(f"collection on your registry host:")
+            print(f"\n  # If registry is running in Docker:")
+            print(f"  docker exec <registry-container> registry garbage-collect /etc/docker/registry/config.yml")
+            print(f"\n  # If registry is running in Kubernetes/Nomad:")
+            print(f"  kubectl exec <registry-pod> -- registry garbage-collect /etc/docker/registry/config.yml")
+            print(f"  nomad alloc exec <registry-alloc> registry garbage-collect /etc/docker/registry/config.yml")
+            print(f"\n  # If registry is a system service:")
+            print(f"  ssh <registry-host> 'registry garbage-collect /etc/docker/registry/config.yml'")
+            print(f"\n" + "="*70)
 
     except KeyboardInterrupt:
         print(f"\n⚠ Operation interrupted by user")

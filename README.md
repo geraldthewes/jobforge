@@ -836,9 +836,24 @@ jobforge kill-job abc123-def456-789
 
 #### Clean Up Job Resources
 
+**Automatic Cleanup (v0.5.22+):**
+Starting with version 0.5.22, temporary Docker registry images are **automatically cleaned up** after jobs complete (both successful and failed). The cleanup job runs automatically:
+- After a job successfully completes the publish phase
+- After a job fails in the build, test, or publish phases
+
+This automatic cleanup ensures that `bdtemp-*` temporary images don't accumulate in your registry.
+
+**Manual Cleanup:**
+You can still manually trigger cleanup if needed:
+
 ```bash
 jobforge cleanup abc123-def456-789
 ```
+
+This command will:
+- Terminate any running Nomad jobs associated with the build
+- Delete temporary registry images (`bdtemp-*` prefixed)
+- Clean up Nomad job specifications
 
 #### Get Job History
 
@@ -891,18 +906,17 @@ while true; do
 
   if [[ "$STATUS" == "SUCCEEDED" ]]; then
     echo "Build completed successfully!"
+    # Note: Temporary images are automatically cleaned up (v0.5.22+)
     break
   elif [[ "$STATUS" == "FAILED" ]]; then
     echo "Build failed! Getting logs..."
     jobforge get-logs $JOB_ID
+    # Note: Temporary images are automatically cleaned up even on failure (v0.5.22+)
     exit 1
   fi
 
   sleep 30
 done
-
-# Clean up
-jobforge cleanup $JOB_ID
 ```
 
 #### Monitoring Script

@@ -220,6 +220,8 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 				}
 				// Release build lock since job is complete
 				nc.releaseBuildLock(job)
+
+				// No temporary images to clean up since we built directly to final tags
 			} else {
 				// Start test phase with a small delay to avoid Docker layer race conditions
 				if job.Status == types.StatusBuilding {
@@ -248,7 +250,7 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			if err := nc.capturePhaseLogs(job, "build"); err != nil {
 				nc.logger.WithError(err).Warn("Failed to capture failed build logs")
 			}
-			
+
 			job.Status = types.StatusFailed
 			job.CurrentPhase = "build"
 			job.FailedPhase = "build"
@@ -268,6 +270,14 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			}
 			// Release build lock since job failed
 			nc.releaseBuildLock(job)
+
+			// Cleanup temporary images from failed build if tests were configured
+			if !skipTests {
+				nc.logger.WithField("job_id", job.ID).Info("Cleaning up temporary images from failed build")
+				if err := nc.cleanupTempImages(job); err != nil {
+					nc.logger.WithError(err).Warn("Failed to cleanup temporary images after build failure")
+				}
+			}
 		}
 	}
 	
@@ -309,7 +319,7 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			if err := nc.capturePhaseLogs(job, "test"); err != nil {
 				nc.logger.WithError(err).Warn("Failed to capture failed test logs")
 			}
-			
+
 			job.Status = types.StatusFailed
 			job.CurrentPhase = "test"
 			job.FailedPhase = "test"
@@ -329,6 +339,12 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			}
 			// Release build lock since job failed
 			nc.releaseBuildLock(job)
+
+			// Cleanup temporary images from failed tests
+			nc.logger.WithField("job_id", job.ID).Info("Cleaning up temporary images from failed test")
+			if err := nc.cleanupTempImages(job); err != nil {
+				nc.logger.WithError(err).Warn("Failed to cleanup temporary images after test failure")
+			}
 		} else if allComplete {
 			// All tests completed successfully, capture logs before they disappear
 			if err := nc.capturePhaseLogs(job, "test"); err != nil {
@@ -379,7 +395,7 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			if err := nc.capturePhaseLogs(job, "publish"); err != nil {
 				nc.logger.WithError(err).Warn("Failed to capture publish logs")
 			}
-			
+
 			job.Status = types.StatusSucceeded
 			job.CurrentPhase = "publish"
 			now := time.Now()
@@ -400,12 +416,18 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			}
 			// Release build lock since job is complete
 			nc.releaseBuildLock(job)
+
+			// Automatically cleanup temporary images after successful publish
+			nc.logger.WithField("job_id", job.ID).Info("Starting automatic cleanup of temporary images after successful publish")
+			if err := nc.cleanupTempImages(job); err != nil {
+				nc.logger.WithError(err).Warn("Failed to automatically cleanup temporary images")
+			}
 		case "failed":
 			// Capture logs from failed publish before they disappear
 			if err := nc.capturePhaseLogs(job, "publish"); err != nil {
 				nc.logger.WithError(err).Warn("Failed to capture failed publish logs")
 			}
-			
+
 			job.Status = types.StatusFailed
 			job.CurrentPhase = "publish"
 			job.FailedPhase = "publish"
@@ -429,6 +451,12 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			}
 			// Release build lock since job failed
 			nc.releaseBuildLock(job)
+
+			// Cleanup temporary images from failed publish
+			nc.logger.WithField("job_id", job.ID).Info("Cleaning up temporary images from failed publish")
+			if err := nc.cleanupTempImages(job); err != nil {
+				nc.logger.WithError(err).Warn("Failed to cleanup temporary images after publish failure")
+			}
 		}
 	}
 	
