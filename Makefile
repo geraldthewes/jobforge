@@ -1,7 +1,7 @@
 # Makefile for Nomad Build Service
 
 # Build variables
-BINARY_NAME=nomad-build-service
+BINARY_NAME=jobforge
 IMAGE_NAME=nomad-build-service
 
 # Versioning - automatically increment patch version
