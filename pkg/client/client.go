@@ -239,6 +239,51 @@ func (c *Client) Health() (*types.HealthResponse, error) {
 	return &response, nil
 }
 
+// GetTestEndpoint gets the external test container's endpoint information
+func (c *Client) GetTestEndpoint(jobID string) (*types.GetTestEndpointResponse, error) {
+	resp, err := c.doRequest("GET", fmt.Sprintf("/json/job/%s/test-endpoint", jobID), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.GetTestEndpointResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}
+
+// ReportTestResult reports the results of external python tests to the server
+func (c *Client) ReportTestResult(req *types.ReportTestResultRequest) (*types.ReportTestResultResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest("POST", fmt.Sprintf("/json/job/%s/test-result", req.JobID), bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.ReportTestResultResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}
+
 // doRequest performs an HTTP request
 func (c *Client) doRequest(method, path string, body io.Reader) (*http.Response, error) {
 	url := c.baseURL + path

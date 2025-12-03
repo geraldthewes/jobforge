@@ -158,6 +158,83 @@ test:
     TEST_REGION: "us-west-2"
 ```
 
+#### External Python Tests Configuration
+
+For web services where you need to test the API from outside the container, you can run external Python tests using `python-executor`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `test.python_cwd` | string | - | Working directory for python tests (relative to repo root) |
+| `test.python_command` | string | - | Command to run (e.g., `"python-executor run --file test.py"`) |
+| `test.health_endpoint` | string | `"/health"` | Health check endpoint to poll before running tests |
+| `test.health_timeout` | integer | `60` | Seconds to wait for health check |
+| `test.container_port` | integer | `8080` | Port the container exposes for the web service |
+
+**How It Works**:
+
+1. The container is started as a long-running service (Nomad service job)
+2. The CLI waits for the health endpoint to respond with 2xx status
+3. The CLI runs the python-executor command with `SERVICE_HOST` and `SERVICE_PORT` environment variables
+4. python-executor runs the tests against the running container
+5. Test results are reported back to the server
+6. If tests pass, the publish phase continues; otherwise, the job fails
+
+**Requirements**:
+- The `--watch` flag is **required** when using python tests
+- `python-executor` must be installed on the machine running the CLI
+- The test code must be in the git repository (referenced by `python_cwd`)
+- The container must expose an HTTP server and respond to health checks
+- Python tests are **exclusive** - cannot be combined with `commands` or `entry_point`
+
+**Environment Variables Injected**:
+- `SERVICE_HOST` - IP address of the running test container
+- `SERVICE_PORT` - Dynamic port assigned by Nomad
+
+**Example**:
+
+```yaml
+# External Python tests for a web service
+test:
+  python_cwd: "tests"
+  python_command: "python-executor run --requirements requirements.txt --file test_api.py"
+  health_endpoint: "/health"
+  health_timeout: 120
+  container_port: 8080
+  env:
+    LOG_LEVEL: "debug"
+  vault_policies:
+    - api-secrets-policy
+  vault_secrets:
+    - path: "secret/data/api/credentials"
+      fields:
+        api_key: "API_KEY"
+```
+
+**Usage**:
+
+```bash
+# Python tests require --watch flag
+jobforge submit-job build.yaml --watch
+
+# Output will show:
+# [12:34:56] 🔨 Status: BUILDING | Phase: build
+# [12:35:42] 🐍 Status: TESTING_EXTERNAL | Phase: test
+#
+# [12:35:45] 🐍 Starting external Python tests...
+# Waiting for test container endpoint...
+# Test container running at 10.0.1.15:21654
+# Waiting for health check at http://10.0.1.15:21654/health (timeout: 120s)...
+# Health check passed!
+# Running Python tests...
+# [python-executor output...]
+# Python tests completed successfully in 15.3s
+#
+# [12:36:10] 📦 Status: PUBLISHING | Phase: publish
+# [12:36:45] ✅ Status: SUCCEEDED | Phase: publish
+#
+# ✅ Job completed successfully
+```
+
 #### Vault Secrets Configuration
 
 **VaultSecret Type**:

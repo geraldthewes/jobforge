@@ -6,12 +6,13 @@ import "time"
 type JobStatus string
 
 const (
-	StatusPending    JobStatus = "PENDING"
-	StatusBuilding   JobStatus = "BUILDING"
-	StatusTesting    JobStatus = "TESTING"
-	StatusPublishing JobStatus = "PUBLISHING"
-	StatusSucceeded  JobStatus = "SUCCEEDED"
-	StatusFailed     JobStatus = "FAILED"
+	StatusPending         JobStatus = "PENDING"
+	StatusBuilding        JobStatus = "BUILDING"
+	StatusTesting         JobStatus = "TESTING"
+	StatusTestingExternal JobStatus = "TESTING_EXTERNAL" // Waiting for CLI to run external python tests
+	StatusPublishing      JobStatus = "PUBLISHING"
+	StatusSucceeded       JobStatus = "SUCCEEDED"
+	StatusFailed          JobStatus = "FAILED"
 )
 
 // VaultSecret defines a Vault secret path and field mappings for environment variables
@@ -39,6 +40,13 @@ type TestConfig struct {
 	GPURequired    bool                   `json:"gpu_required,omitempty" yaml:"gpu_required,omitempty"`     // Enable GPU runtime (nvidia) for test containers
 	GPUCount       int                    `json:"gpu_count,omitempty" yaml:"gpu_count,omitempty"`           // Number of GPUs to allocate (0 = all available)
 	Constraints    []Constraint           `json:"constraints,omitempty" yaml:"constraints,omitempty"`       // Custom node constraints for test job placement
+
+	// External Python test configuration (runs via python-executor on CLI machine)
+	PythonCwd      string `json:"python_cwd,omitempty" yaml:"python_cwd,omitempty"`           // Working directory for python tests (relative to repo root)
+	PythonCommand  string `json:"python_command,omitempty" yaml:"python_command,omitempty"`   // Command to run (e.g., "python-executor run --file test.py")
+	HealthEndpoint string `json:"health_endpoint,omitempty" yaml:"health_endpoint,omitempty"` // Health check endpoint to poll before tests (default: /health)
+	HealthTimeout  int    `json:"health_timeout,omitempty" yaml:"health_timeout,omitempty"`   // Seconds to wait for health check (default: 60)
+	ContainerPort  int    `json:"container_port,omitempty" yaml:"container_port,omitempty"`   // Port the container exposes (default: 8080)
 }
 
 // JobConfig represents the configuration for a build job
@@ -280,6 +288,11 @@ type Job struct {
 	// Distributed locking information
 	LockKey       string `json:"lock_key,omitempty"`
 	LockSessionID string `json:"lock_session_id,omitempty"`
+
+	// External test container endpoint info (for python tests)
+	TestServiceHost string `json:"test_service_host,omitempty"` // IP address of running test container
+	TestServicePort int    `json:"test_service_port,omitempty"` // Dynamic port assigned by Nomad
+	TestJobNomadID  string `json:"test_job_nomad_id,omitempty"` // Nomad job ID for external test container
 }
 
 // JobLogs contains logs for each phase of the build

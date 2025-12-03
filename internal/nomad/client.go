@@ -178,8 +178,11 @@ func (nc *Client) CreateJob(jobConfig *types.JobConfig) (*types.Job, error) {
 
 // UpdateJobStatus updates the job status by querying Nomad
 func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
-	// Check if tests are configured
-	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint)
+	// Check if tests are configured (including external python tests)
+	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonCommand == "")
+
+	// Check if this is an external (python) test job
+	isExternalTest := job.Config.Test != nil && job.Config.Test.PythonCommand != ""
 	
 	// Check build job status
 	if job.BuildJobID != "" {
@@ -378,7 +381,68 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			}
 		}
 	}
-	
+
+	// Handle external (python) test job status
+	if isExternalTest && job.TestJobNomadID != "" {
+		testStatus, err := nc.getJobStatus(job.TestJobNomadID)
+		if err != nil {
+			return job, fmt.Errorf("failed to get external test job status: %w", err)
+		}
+
+		switch testStatus {
+		case "running":
+			// Check if we can get the endpoint info
+			if job.TestServiceHost == "" || job.TestServicePort == 0 {
+				host, port, err := nc.GetExternalTestEndpoint(job)
+				if err == nil && host != "" && port > 0 {
+					job.TestServiceHost = host
+					job.TestServicePort = port
+					job.Status = types.StatusTestingExternal
+					job.CurrentPhase = "test"
+					nc.logger.WithFields(logrus.Fields{
+						"job_id":       job.ID,
+						"service_host": host,
+						"service_port": port,
+					}).Info("External test container endpoint discovered, waiting for CLI to run tests")
+				} else {
+					// Container still starting, endpoint not yet available
+					job.Status = types.StatusTesting
+					job.CurrentPhase = "test"
+				}
+			} else {
+				// Endpoint already known, keep waiting for CLI to report results
+				job.Status = types.StatusTestingExternal
+				job.CurrentPhase = "test"
+			}
+		case "failed":
+			// External test container failed to start or crashed
+			if err := nc.capturePhaseLogs(job, "test"); err != nil {
+				nc.logger.WithError(err).Warn("Failed to capture external test logs")
+			}
+
+			job.Status = types.StatusFailed
+			job.CurrentPhase = "test"
+			job.FailedPhase = "test"
+			errorMsg, err := nc.getJobErrorDetails(job.TestJobNomadID)
+			if err != nil {
+				job.Error = "External test container failed - unable to get error details"
+			} else {
+				job.Error = fmt.Sprintf("External test container failed: %s", errorMsg)
+			}
+			now := time.Now()
+			job.FinishedAt = &now
+			job.Metrics.TestEnd = &now
+			job.Metrics.JobEnd = &now
+			if job.Metrics.TestStart != nil {
+				job.Metrics.TestDuration = now.Sub(*job.Metrics.TestStart)
+			}
+			nc.releaseBuildLock(job)
+			nc.cleanupTempImages(job)
+		}
+		// Note: "complete" status won't happen since it's a service job
+		// The CLI reports test results via the API, which then stops the job
+	}
+
 	// Check publish job status
 	if job.PublishJobID != "" {
 		publishStatus, err := nc.getJobStatus(job.PublishJobID)
@@ -1084,6 +1148,11 @@ func (nc *Client) getBuildJobNodeID(buildJobID string) (string, error) {
 }
 
 func (nc *Client) startTestPhase(job *types.Job) error {
+	// Check if this is an external (python) test
+	if job.Config.Test != nil && job.Config.Test.PythonCommand != "" {
+		return nc.startExternalTestPhase(job)
+	}
+
 	if job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint) {
 		// No tests configured, skip to publish phase
 		nc.logger.WithField("job_id", job.ID).Info("No tests configured, skipping test phase")
@@ -1205,8 +1274,128 @@ func (nc *Client) startPublishPhase(job *types.Job) error {
 		"nomad_job":   *publishJobSpec.ID,
 		"eval_id":     evalID,
 	}).Info("Publish job submitted to Nomad")
-	
+
 	return nil
+}
+
+// startExternalTestPhase starts a service job for external (python) tests
+// The container stays running so the CLI can execute tests against it
+func (nc *Client) startExternalTestPhase(job *types.Job) error {
+	buildNodeID, err := nc.getBuildJobNodeID(job.BuildJobID)
+	if err != nil {
+		nc.logger.WithError(err).Warn("Failed to get build job node ID, proceeding without constraint")
+		buildNodeID = ""
+	}
+
+	testJobSpec, err := nc.createExternalTestJobSpec(job, buildNodeID)
+	if err != nil {
+		return fmt.Errorf("failed to create external test job spec: %w", err)
+	}
+
+	nc.logJobSpec(testJobSpec, "test-external")
+
+	registerOpts := &nomadapi.RegisterOptions{
+		PolicyOverride: false,
+		PreserveCounts: false,
+	}
+	writeOpts := &nomadapi.WriteOptions{
+		Region:    nc.config.Nomad.Region,
+		Namespace: nc.config.Nomad.Namespace,
+	}
+
+	evalID, _, err := nc.client.Jobs().RegisterOpts(testJobSpec, registerOpts, writeOpts)
+	if err != nil {
+		return fmt.Errorf("failed to submit external test job: %w", err)
+	}
+
+	job.TestJobNomadID = *testJobSpec.ID
+
+	nc.logger.WithFields(logrus.Fields{
+		"job_id":    job.ID,
+		"nomad_job": *testJobSpec.ID,
+		"eval_id":   evalID,
+	}).Info("External test job submitted to Nomad")
+
+	return nil
+}
+
+// GetExternalTestEndpoint discovers the IP and port of a running external test container
+func (nc *Client) GetExternalTestEndpoint(job *types.Job) (string, int, error) {
+	if job.TestJobNomadID == "" {
+		return "", 0, fmt.Errorf("no external test job running")
+	}
+
+	queryOpts := &nomadapi.QueryOptions{
+		Namespace: nc.config.Nomad.Namespace,
+	}
+
+	allocs, _, err := nc.client.Jobs().Allocations(job.TestJobNomadID, false, queryOpts)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to get allocations: %w", err)
+	}
+
+	for _, alloc := range allocs {
+		if alloc.ClientStatus == "running" {
+			allocInfo, _, err := nc.client.Allocations().Info(alloc.ID, queryOpts)
+			if err != nil {
+				nc.logger.WithError(err).Warn("Failed to get allocation info")
+				continue
+			}
+
+			// Get the dynamic port from the allocation's resources
+			if allocInfo.AllocatedResources != nil {
+				for _, network := range allocInfo.AllocatedResources.Shared.Networks {
+					for _, port := range network.DynamicPorts {
+						if port.Label == "http" {
+							return network.IP, port.Value, nil
+						}
+					}
+				}
+			}
+
+			// Fallback: try to get from task resources
+			if allocInfo.Resources != nil && allocInfo.Resources.Networks != nil {
+				for _, network := range allocInfo.Resources.Networks {
+					for _, port := range network.DynamicPorts {
+						if port.Label == "http" {
+							return network.IP, port.Value, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return "", 0, fmt.Errorf("no running allocation with port found")
+}
+
+// StopExternalTestJob stops the external test service job
+func (nc *Client) StopExternalTestJob(job *types.Job) error {
+	if job.TestJobNomadID == "" {
+		return nil
+	}
+
+	writeOpts := &nomadapi.WriteOptions{
+		Region:    nc.config.Nomad.Region,
+		Namespace: nc.config.Nomad.Namespace,
+	}
+
+	_, _, err := nc.client.Jobs().Deregister(job.TestJobNomadID, false, writeOpts)
+	if err != nil {
+		return fmt.Errorf("failed to stop external test job: %w", err)
+	}
+
+	nc.logger.WithFields(logrus.Fields{
+		"job_id":    job.ID,
+		"nomad_job": job.TestJobNomadID,
+	}).Info("External test job stopped")
+
+	return nil
+}
+
+// StartPublishPhaseAfterExternalTest is called by the API after CLI reports test success
+func (nc *Client) StartPublishPhaseAfterExternalTest(job *types.Job) error {
+	return nc.startPublishPhase(job)
 }
 
 func (nc *Client) cleanupTempImages(job *types.Job) error {

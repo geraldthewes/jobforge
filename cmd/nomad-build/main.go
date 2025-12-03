@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -338,6 +341,11 @@ func handleSubmitJob(c *client.Client, args []string) error {
 		}
 	}
 
+	// Validate that --watch is required for python tests
+	if jobConfig.Test != nil && jobConfig.Test.PythonCommand != "" && !watch {
+		return fmt.Errorf("--watch flag is required when using python tests (test.python_command is set)")
+	}
+
 	// Set image tags from --image-tags flag if provided
 	// If not provided, server will default to using job-id as the tag
 	if len(additionalImageTags) > 0 {
@@ -404,7 +412,7 @@ func handleSubmitJob(c *client.Client, args []string) error {
 
 	// If --watch flag is set, watch the job progress instead of returning immediately
 	if watch {
-		return watchJobProgress(response.JobID, c.GetBaseURL(), historyMgr, submissionTime)
+		return watchJobProgress(response.JobID, c.GetBaseURL(), historyMgr, submissionTime, jobConfig)
 	}
 
 	// Output response
@@ -637,7 +645,8 @@ func handleHealth(c *client.Client, args []string) error {
 
 // watchJobProgress watches a job's progress in real-time using Consul KV
 // If historyMgr is provided, logs and final status are written to local history
-func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manager, submissionTime time.Time) error {
+// If jobConfig is provided and has python_command, runs python tests when status is TESTING_EXTERNAL
+func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manager, submissionTime time.Time, jobConfig *types.JobConfig) error {
 	fmt.Printf("Watching job: %s\n", jobID)
 	fmt.Printf("Service URL: %s\n\n", serviceURL)
 
@@ -658,6 +667,7 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 
 	var lastStatus types.JobStatus
 	var lastPhase string
+	pythonTestsTriggered := false // Flag to ensure we only run python tests once
 
 	// Process updates until job completes
 	for {
@@ -687,6 +697,20 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 
 				lastStatus = update.Status
 				lastPhase = update.Phase
+			}
+
+			// Handle external python tests
+			if update.Status == types.StatusTestingExternal && !pythonTestsTriggered {
+				if jobConfig != nil && jobConfig.Test != nil && jobConfig.Test.PythonCommand != "" {
+					pythonTestsTriggered = true
+					fmt.Printf("\n[%s] 🐍 Starting external Python tests...\n", time.Now().Format("15:04:05"))
+
+					err := runPythonTests(jobID, serviceURL, jobConfig)
+					if err != nil {
+						fmt.Printf("\n❌ Python tests failed: %v\n", err)
+						// Continue watching - server will update status based on our result report
+					}
+				}
 			}
 
 			// Check if job reached terminal state
@@ -743,6 +767,8 @@ func getStatusSymbol(status types.JobStatus) string {
 		return "🔨"
 	case types.StatusTesting:
 		return "🧪"
+	case types.StatusTestingExternal:
+		return "🐍"
 	case types.StatusPublishing:
 		return "📦"
 	case types.StatusSucceeded:
@@ -752,6 +778,144 @@ func getStatusSymbol(status types.JobStatus) string {
 	default:
 		return "❓"
 	}
+}
+
+// runPythonTests runs external python tests against the test container
+func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error {
+	httpClient := client.NewClient(serviceURL)
+
+	// 1. Get test endpoint from server (with retries)
+	var endpoint *types.GetTestEndpointResponse
+	var err error
+
+	fmt.Printf("Waiting for test container endpoint...\n")
+	for i := 0; i < 30; i++ {
+		endpoint, err = httpClient.GetTestEndpoint(jobID)
+		if err == nil && endpoint.ServiceHost != "" && endpoint.ServicePort > 0 {
+			break
+		}
+		fmt.Printf("  Waiting for test container to start (%d/30)...\n", i+1)
+		time.Sleep(2 * time.Second)
+	}
+
+	if endpoint == nil || endpoint.ServiceHost == "" {
+		return reportTestFailure(httpClient, jobID, "Failed to get test container endpoint", -1)
+	}
+
+	fmt.Printf("Test container running at %s:%d\n", endpoint.ServiceHost, endpoint.ServicePort)
+
+	// 2. Wait for health check
+	healthEndpoint := "/health"
+	if jobConfig.Test.HealthEndpoint != "" {
+		healthEndpoint = jobConfig.Test.HealthEndpoint
+	}
+
+	healthURL := fmt.Sprintf("http://%s:%d%s",
+		endpoint.ServiceHost,
+		endpoint.ServicePort,
+		healthEndpoint)
+
+	timeout := 60
+	if jobConfig.Test.HealthTimeout > 0 {
+		timeout = jobConfig.Test.HealthTimeout
+	}
+
+	fmt.Printf("Waiting for health check at %s (timeout: %ds)...\n", healthURL, timeout)
+
+	healthy := false
+	healthHTTPClient := &http.Client{Timeout: 5 * time.Second}
+
+	for i := 0; i < timeout/2; i++ {
+		resp, err := healthHTTPClient.Get(healthURL)
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			resp.Body.Close()
+			healthy = true
+			fmt.Println("Health check passed!")
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	if !healthy {
+		return reportTestFailure(httpClient, jobID, fmt.Sprintf("Health check timeout after %ds", timeout), -1)
+	}
+
+	// 3. Run python-executor
+	fmt.Println("Running Python tests...")
+	startTime := time.Now()
+
+	cmdParts := strings.Fields(jobConfig.Test.PythonCommand)
+	if len(cmdParts) == 0 {
+		return reportTestFailure(httpClient, jobID, "Empty python_command", -1)
+	}
+
+	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+
+	// Set working directory
+	if jobConfig.Test.PythonCwd != "" {
+		cmd.Dir = jobConfig.Test.PythonCwd
+	}
+
+	// Set environment variables
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort))
+
+	// Capture output while also printing to console
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+
+	err = cmd.Run()
+	duration := time.Since(startTime)
+
+	// 4. Report results to server
+	exitCode := 0
+	success := true
+	if err != nil {
+		success = false
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	result := &types.ReportTestResultRequest{
+		JobID:    jobID,
+		Success:  success,
+		ExitCode: exitCode,
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		Duration: duration.Milliseconds(),
+	}
+
+	_, err = httpClient.ReportTestResult(result)
+	if err != nil {
+		return fmt.Errorf("failed to report test result: %w", err)
+	}
+
+	if !success {
+		return fmt.Errorf("tests failed with exit code %d", exitCode)
+	}
+
+	fmt.Printf("Python tests completed successfully in %v\n", duration)
+	return nil
+}
+
+// reportTestFailure is a helper to report test failures to the server
+func reportTestFailure(c *client.Client, jobID, message string, exitCode int) error {
+	result := &types.ReportTestResultRequest{
+		JobID:    jobID,
+		Success:  false,
+		ExitCode: exitCode,
+		Stderr:   message,
+	}
+	c.ReportTestResult(result)
+	return fmt.Errorf(message)
 }
 
 // writeCompleteHistory fetches job details and logs from server and writes complete history

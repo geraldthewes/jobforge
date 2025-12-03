@@ -1709,37 +1709,55 @@ func parseResourceLimitsFromMCP(limitsInterface interface{}) *types.ResourceLimi
 }
 
 // handleJobResource handles RESTful job resource endpoints
-// Routes: GET /json/job/{jobID}/status and GET /json/job/{jobID}/logs
+// Routes: GET /json/job/{jobID}/status, GET /json/job/{jobID}/logs,
+//         GET /json/job/{jobID}/test-endpoint, POST /json/job/{jobID}/test-result
 func (s *Server) handleJobResource(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	// Parse URL path: /json/job/{jobID}/{resource} or /mcp/job/{jobID}/{resource}
+	path := r.URL.Path
+	path = strings.TrimPrefix(path, "/json/job/")
+	path = strings.TrimPrefix(path, "/mcp/job/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) != 2 {
+		http.Error(w, "Invalid path format. Expected: /mcp/job/{jobID}/{status|logs|test-endpoint|test-result}", http.StatusBadRequest)
 		return
 	}
 
-	// Parse URL path: /json/job/{jobID}/{resource}
-	path := strings.TrimPrefix(r.URL.Path, "/json/job/")
-	parts := strings.Split(path, "/")
-	
-	if len(parts) != 2 {
-		http.Error(w, "Invalid path format. Expected: /json/job/{jobID}/{status|logs}", http.StatusBadRequest)
-		return
-	}
-	
 	jobID := parts[0]
 	resource := parts[1]
-	
+
 	if jobID == "" {
 		http.Error(w, "Job ID is required", http.StatusBadRequest)
 		return
 	}
-	
+
 	switch resource {
 	case "status":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		s.handleJobStatus(w, r, jobID)
 	case "logs":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		s.handleJobLogs(w, r, jobID)
+	case "test-endpoint":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleGetTestEndpoint(w, r, jobID)
+	case "test-result":
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleReportTestResult(w, r, jobID)
 	default:
-		http.Error(w, "Invalid resource. Expected: status or logs", http.StatusBadRequest)
+		http.Error(w, "Invalid resource. Expected: status, logs, test-endpoint, or test-result", http.StatusBadRequest)
 	}
 }
 
@@ -1914,6 +1932,209 @@ func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request, jobID str
 		"status":      http.StatusOK,
 		"duration_ms": duration.Milliseconds(),
 	}).Info("REST API logs request completed")
+}
+
+// handleGetTestEndpoint handles GET /mcp/job/{jobID}/test-endpoint
+// Returns the external test container's endpoint information for CLI to connect to
+func (s *Server) handleGetTestEndpoint(w http.ResponseWriter, r *http.Request, jobID string) {
+	startTime := time.Now()
+
+	s.logger.WithFields(map[string]interface{}{
+		"method":      r.Method,
+		"uri":         r.RequestURI,
+		"remote_addr": r.RemoteAddr,
+		"interface":   "REST",
+		"endpoint":    "getTestEndpoint",
+		"job_id":      jobID,
+	}).Info("REST API test endpoint request received")
+
+	job, err := s.storage.GetJob(jobID)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to get job", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if job == nil {
+		s.writeErrorResponse(w, "Job not found", http.StatusNotFound, "")
+		return
+	}
+
+	// Check if this is an external test job
+	if job.Config.Test == nil || job.Config.Test.PythonCommand == "" {
+		s.writeErrorResponse(w, "Job is not configured for external python tests", http.StatusBadRequest, "")
+		return
+	}
+
+	// If endpoint not yet discovered, try to get it
+	if job.TestServiceHost == "" && job.TestJobNomadID != "" {
+		host, port, err := s.nomadClient.GetExternalTestEndpoint(job)
+		if err == nil && host != "" && port > 0 {
+			oldStatus := job.Status
+			oldPhase := job.CurrentPhase
+			job.TestServiceHost = host
+			job.TestServicePort = port
+			job.Status = types.StatusTestingExternal
+			s.storage.UpdateJob(job)
+			s.handleJobStatusChange(job, oldStatus, oldPhase)
+		}
+	}
+
+	healthEndpoint := "/health"
+	if job.Config.Test != nil && job.Config.Test.HealthEndpoint != "" {
+		healthEndpoint = job.Config.Test.HealthEndpoint
+	}
+
+	response := types.GetTestEndpointResponse{
+		JobID:          job.ID,
+		ServiceHost:    job.TestServiceHost,
+		ServicePort:    job.TestServicePort,
+		HealthEndpoint: healthEndpoint,
+		Status:         job.Status,
+	}
+
+	duration := time.Since(startTime)
+	s.logger.WithFields(map[string]interface{}{
+		"method":       r.Method,
+		"uri":          r.RequestURI,
+		"remote_addr":  r.RemoteAddr,
+		"interface":    "REST",
+		"endpoint":     "getTestEndpoint",
+		"job_id":       jobID,
+		"service_host": job.TestServiceHost,
+		"service_port": job.TestServicePort,
+		"status":       http.StatusOK,
+		"duration_ms":  duration.Milliseconds(),
+	}).Info("REST API test endpoint request completed")
+
+	s.writeJSONResponse(w, response)
+}
+
+// handleReportTestResult handles POST /mcp/job/{jobID}/test-result
+// Receives test results from CLI after running external python tests
+func (s *Server) handleReportTestResult(w http.ResponseWriter, r *http.Request, jobID string) {
+	startTime := time.Now()
+
+	s.logger.WithFields(map[string]interface{}{
+		"method":      r.Method,
+		"uri":         r.RequestURI,
+		"remote_addr": r.RemoteAddr,
+		"interface":   "REST",
+		"endpoint":    "reportTestResult",
+		"job_id":      jobID,
+	}).Info("REST API test result report received")
+
+	var req types.ReportTestResultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, "Invalid request body", http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Lock the job for update
+	unlock := s.lockJob(jobID)
+	defer unlock()
+
+	job, err := s.storage.GetJob(jobID)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to get job", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if job == nil {
+		s.writeErrorResponse(w, "Job not found", http.StatusNotFound, "")
+		return
+	}
+
+	// Capture old status for webhook handling
+	oldStatus := job.Status
+	oldPhase := job.CurrentPhase
+
+	// Stop the external test container
+	if err := s.nomadClient.StopExternalTestJob(job); err != nil {
+		s.logger.WithError(err).Warn("Failed to stop external test job")
+	}
+
+	// Capture test container logs before stopping
+	if logs, err := s.nomadClient.GetJobLogs(job); err == nil {
+		job.Logs.Test = logs.Test
+	}
+
+	// Append CLI-reported output to logs
+	if req.Stdout != "" {
+		job.Logs.Test = append(job.Logs.Test, "=== Python Test Output (stdout) ===")
+		job.Logs.Test = append(job.Logs.Test, strings.Split(req.Stdout, "\n")...)
+	}
+	if req.Stderr != "" {
+		job.Logs.Test = append(job.Logs.Test, "=== Python Test Output (stderr) ===")
+		job.Logs.Test = append(job.Logs.Test, strings.Split(req.Stderr, "\n")...)
+	}
+
+	// Update metrics
+	now := time.Now()
+	job.Metrics.TestEnd = &now
+	if job.Metrics.TestStart != nil {
+		job.Metrics.TestDuration = now.Sub(*job.Metrics.TestStart)
+	}
+
+	var responseMessage string
+	if req.Success {
+		// Proceed to publish phase
+		if err := s.nomadClient.StartPublishPhaseAfterExternalTest(job); err != nil {
+			job.Status = types.StatusFailed
+			job.Error = fmt.Sprintf("Failed to start publish phase: %v", err)
+			job.FinishedAt = &now
+			job.Metrics.JobEnd = &now
+			responseMessage = "Test passed but failed to start publish phase"
+		} else {
+			job.Status = types.StatusPublishing
+			job.CurrentPhase = "publish"
+			job.Metrics.PublishStart = &now
+			responseMessage = "Test passed, publish phase started"
+		}
+	} else {
+		job.Status = types.StatusFailed
+		job.FailedPhase = "test"
+		job.Error = fmt.Sprintf("Python tests failed with exit code %d", req.ExitCode)
+		job.FinishedAt = &now
+		job.Metrics.JobEnd = &now
+		responseMessage = "Test failed"
+
+		// Release build lock (already called above, but ensure cleanup)
+		// Note: StopExternalTestJob already called above
+
+		// Cleanup temp images
+		s.nomadClient.CleanupJob(job)
+	}
+
+	// Persist job state
+	if err := s.storage.UpdateJob(job); err != nil {
+		s.logger.WithError(err).Error("Failed to update job after test result")
+	}
+
+	// Update Consul KV for watchers
+	s.handleJobStatusChange(job, oldStatus, oldPhase)
+
+	response := types.ReportTestResultResponse{
+		JobID:   job.ID,
+		Status:  job.Status,
+		Message: responseMessage,
+	}
+
+	duration := time.Since(startTime)
+	s.logger.WithFields(map[string]interface{}{
+		"method":      r.Method,
+		"uri":         r.RequestURI,
+		"remote_addr": r.RemoteAddr,
+		"interface":   "REST",
+		"endpoint":    "reportTestResult",
+		"job_id":      jobID,
+		"success":     req.Success,
+		"exit_code":   req.ExitCode,
+		"new_status":  job.Status,
+		"status":      http.StatusOK,
+		"duration_ms": duration.Milliseconds(),
+	}).Info("REST API test result report processed")
+
+	s.writeJSONResponse(w, response)
 }
 
 // sendWebhook sends a webhook notification for job events

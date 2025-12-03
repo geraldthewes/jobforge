@@ -98,3 +98,30 @@ type ErrorResponse struct {
 	Code    int    `json:"code"`
 	Details string `json:"details,omitempty"`
 }
+
+// GetTestEndpointResponse returns the external test container's endpoint information
+// Used by CLI to discover where to run python tests against
+type GetTestEndpointResponse struct {
+	JobID          string    `json:"job_id"`
+	ServiceHost    string    `json:"service_host"`              // IP address of test container
+	ServicePort    int       `json:"service_port"`              // Dynamic port assigned by Nomad
+	HealthEndpoint string    `json:"health_endpoint"`           // Endpoint to poll for readiness
+	Status         JobStatus `json:"status"`                    // Current job status
+}
+
+// ReportTestResultRequest is sent by CLI after running external python tests
+type ReportTestResultRequest struct {
+	JobID    string `json:"job_id"`
+	Success  bool   `json:"success"`            // Whether tests passed
+	ExitCode int    `json:"exit_code"`          // Exit code from python-executor
+	Stdout   string `json:"stdout,omitempty"`   // Captured stdout
+	Stderr   string `json:"stderr,omitempty"`   // Captured stderr
+	Duration int64  `json:"duration_ms"`        // Test execution duration in milliseconds
+}
+
+// ReportTestResultResponse acknowledges the test result from CLI
+type ReportTestResultResponse struct {
+	JobID   string    `json:"job_id"`
+	Status  JobStatus `json:"status"`   // New job status after processing result
+	Message string    `json:"message"`
+}

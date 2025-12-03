@@ -29,7 +29,8 @@ func (nc *Client) createBuildJobSpec(job *types.Job) (*nomadapi.Job, error) {
 	fmt.Sscanf(buildLimits.Disk, "%d", &disk)
 	
 	// Determine if we should skip tests (no tests configured)
-	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint)
+	// Python tests also require the temp image flow
+	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonCommand == "")
 	
 	var buildImageNames []string
 	var pushCommands []string
@@ -479,6 +480,147 @@ func (nc *Client) createTestJobSpecs(job *types.Job, buildNodeID string) ([]*nom
 	}
 	
 	return testJobs, nil
+}
+
+// createExternalTestJobSpec creates a Nomad service job for external (python) tests
+// Unlike regular test jobs, this creates a long-running service that the CLI connects to
+func (nc *Client) createExternalTestJobSpec(job *types.Job, buildNodeID string) (*nomadapi.Job, error) {
+	jobID := fmt.Sprintf("test-external-%s", job.ID)
+
+	// Determine the container port (default 8080)
+	containerPort := 8080
+	if job.Config.Test != nil && job.Config.Test.ContainerPort > 0 {
+		containerPort = job.Config.Test.ContainerPort
+	}
+
+	tempImageName := nc.generateTempImageName(job)
+	constraints := nc.buildTestConstraints(job, buildNodeID)
+
+	// Resource limits with defaults for test phase
+	testDefaults := types.PhaseResourceLimits{
+		CPU:    "500",
+		Memory: "1024",
+		Disk:   "2048",
+	}
+
+	var testLimits types.PhaseResourceLimits
+	if job.Config.Test != nil && job.Config.Test.ResourceLimits != nil {
+		testLimits = *job.Config.Test.ResourceLimits
+		if testLimits.CPU == "" {
+			testLimits.CPU = testDefaults.CPU
+		}
+		if testLimits.Memory == "" {
+			testLimits.Memory = testDefaults.Memory
+		}
+		if testLimits.Disk == "" {
+			testLimits.Disk = testDefaults.Disk
+		}
+	} else {
+		testLimits = job.Config.ResourceLimits.GetTestLimits(testDefaults)
+	}
+
+	var cpu, memory, disk int
+	fmt.Sscanf(testLimits.CPU, "%d", &cpu)
+	fmt.Sscanf(testLimits.Memory, "%d", &memory)
+	fmt.Sscanf(testLimits.Disk, "%d", &disk)
+
+	// Docker config for external test container
+	dockerConfig := map[string]interface{}{
+		"image":      tempImageName,
+		"force_pull": true,
+		"ports":      []string{"http"},
+		"volumes": []string{
+			"/etc/docker/certs.d:/etc/docker/certs.d:ro",
+		},
+	}
+
+	// Add GPU runtime if required
+	if job.Config.Test != nil && job.Config.Test.GPURequired {
+		dockerConfig["runtime"] = "nvidia"
+	}
+
+	// Add Docker logging configuration
+	dockerConfig["logging"] = map[string]interface{}{
+		"type": "json-file",
+		"config": []map[string]interface{}{
+			{
+				"max-file": fmt.Sprintf("%d", nc.config.Build.DockerLogMaxFiles),
+				"max-size": nc.config.Build.DockerLogMaxFileSize,
+			},
+		},
+	}
+
+	testJobSpec := &nomadapi.Job{
+		ID:          &jobID,
+		Name:        &jobID,
+		Type:        stringPtr("service"), // SERVICE job, not batch - stays running
+		Namespace:   stringPtr(nc.config.Nomad.Namespace),
+		Region:      stringPtr(nc.config.Nomad.Region),
+		Datacenters: nc.config.Nomad.Datacenters,
+		Meta: map[string]string{
+			"build-service-job-id": job.ID,
+			"phase":                "test",
+			"test-type":            "external",
+		},
+		TaskGroups: []*nomadapi.TaskGroup{
+			{
+				Name:        stringPtr("test"),
+				Count:       intPtr(1),
+				Constraints: constraints,
+				Networks: []*nomadapi.NetworkResource{
+					{
+						Mode: "host",
+						DynamicPorts: []nomadapi.Port{
+							{
+								Label: "http",
+								To:    containerPort,
+							},
+						},
+					},
+				},
+				Tasks: []*nomadapi.Task{
+					{
+						Name:      "main",
+						Driver:    "docker",
+						Config:    dockerConfig,
+						Env:       nc.buildTestEnv(job),
+						Resources: nc.buildTestResources(job, cpu, memory, disk),
+						LogConfig: &nomadapi.LogConfig{
+							MaxFiles:      intPtr(nc.config.Build.DockerLogMaxFiles),
+							MaxFileSizeMB: intPtr(10),
+						},
+					},
+				},
+				EphemeralDisk: &nomadapi.EphemeralDisk{
+					SizeMB: intPtr(disk),
+				},
+			},
+		},
+	}
+
+	// Add Vault integration if vault secrets OR registry credentials are needed
+	if (job.Config.Test != nil && len(job.Config.Test.VaultSecrets) > 0) || job.Config.RegistryCredentialsPath != "" {
+		templates := testTemplates(job)
+		if len(templates) > 0 {
+			mainTask := testJobSpec.TaskGroups[0].Tasks[0]
+
+			var policies []string
+			if job.Config.Test != nil && len(job.Config.Test.VaultPolicies) > 0 {
+				policies = job.Config.Test.VaultPolicies
+			} else {
+				policies = []string{"nomad-build-service"}
+			}
+
+			mainTask.Vault = &nomadapi.Vault{
+				Policies:   policies,
+				ChangeMode: stringPtr("restart"),
+				Role:       "nomad-workloads",
+			}
+			mainTask.Templates = templates
+		}
+	}
+
+	return testJobSpec, nil
 }
 
 // createPublishJobSpec creates a Nomad job specification for the publish phase
