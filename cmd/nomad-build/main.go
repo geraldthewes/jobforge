@@ -341,9 +341,10 @@ func handleSubmitJob(c *client.Client, args []string) error {
 		}
 	}
 
-	// Validate that --watch is required for python tests
+	// Automatically enable --watch for python tests and inform the user
 	if jobConfig.Test != nil && jobConfig.Test.PythonCommand != "" && !watch {
-		return fmt.Errorf("--watch flag is required when using python tests (test.python_command is set)")
+		watch = true
+		fmt.Println("Note: Python test command detected - watch mode enabled automatically")
 	}
 
 	// Set image tags from --image-tags flag if provided
