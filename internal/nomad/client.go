@@ -688,13 +688,19 @@ func (nc *Client) KillJob(job *types.Job) error {
 	
 	// Release the build lock since job is being terminated
 	nc.releaseBuildLock(job)
-	
-	// Update job status to FAILED
+
+	// Update job status to FAILED (only if not already failed with a specific error)
 	now := time.Now()
-	job.Status = types.StatusFailed
-	job.Error = "Job was killed by user request"
-	job.FinishedAt = &now
-	job.Metrics.JobEnd = &now
+	if job.Status != types.StatusFailed {
+		job.Status = types.StatusFailed
+		job.Error = "Job was killed by user request"
+	}
+	if job.FinishedAt == nil {
+		job.FinishedAt = &now
+	}
+	if job.Metrics.JobEnd == nil {
+		job.Metrics.JobEnd = &now
+	}
 	
 	if len(errors) > 0 {
 		return fmt.Errorf("failed to kill some jobs: %s", strings.Join(errors, ", "))
@@ -802,14 +808,42 @@ func (nc *Client) getJobStatus(nomadJobID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
+	// For service jobs, check deployment status first
+	// If deployment is still running, Nomad is actively trying to place the job
+	if job.Type != nil && *job.Type == "service" {
+		deploys, _, err := nc.client.Jobs().Deployments(nomadJobID, false, nil)
+		if err == nil && len(deploys) > 0 {
+			// Get most recent deployment
+			latestDeploy := deploys[0]
+			for _, d := range deploys {
+				if d.CreateIndex > latestDeploy.CreateIndex {
+					latestDeploy = d
+				}
+			}
+			// If deployment is still running, job is not failed yet
+			if latestDeploy.Status == "running" {
+				nc.logger.WithFields(logrus.Fields{
+					"job_id":           nomadJobID,
+					"deployment_id":    latestDeploy.ID,
+					"deployment_status": latestDeploy.Status,
+				}).Debug("Deployment still running, waiting for Nomad to reschedule")
+				return "pending", nil
+			}
+			// If deployment explicitly failed, job has failed
+			if latestDeploy.Status == "failed" || latestDeploy.Status == "cancelled" {
+				return "failed", nil
+			}
+		}
+	}
+
 	// Check allocations for more detailed status
 	allocs, _, err := nc.client.Jobs().Allocations(nomadJobID, false, nil)
 	if err != nil {
 		// If we can't get allocations but job exists, something is wrong
 		nc.logger.WithError(err).WithField("job_id", nomadJobID).Warn("Failed to get job allocations")
 	}
-	
+
 	// Handle case where job is dead with no allocations (scheduling failure)
 	if *job.Status == "dead" && (allocs == nil || len(allocs) == 0) {
 		return "failed", nil
@@ -844,35 +878,29 @@ func (nc *Client) getJobStatus(nomadJobID string) (string, error) {
 	}
 	
 	if err == nil && len(allocs) > 0 {
-		// Check if any allocation failed
-		for _, alloc := range allocs {
-			if alloc.ClientStatus == "failed" {
-				return "failed", nil
-			}
-			// Check task states for more granular failure detection
-			if alloc.TaskStates != nil {
-				for _, taskState := range alloc.TaskStates {
-					if taskState.State == "dead" && taskState.Failed {
-						return "failed", nil
-					}
-				}
-			}
-		}
-
-		// If we have allocations, check their status
+		// First pass: collect allocation status counts
+		// Don't immediately fail if some allocations failed - Nomad may be rescheduling
 		hasRunning := false
+		hasPending := false
+		hasFailed := false
 		allComplete := true
+
 		for _, alloc := range allocs {
 			switch alloc.ClientStatus {
 			case "running":
 				hasRunning = true
 				allComplete = false
 			case "pending":
+				hasPending = true
 				allComplete = false
 			case "complete":
 				// Keep checking others
+			case "failed":
+				hasFailed = true
+				allComplete = false
 			case "lost":
 				// Lost allocations should be treated as failed
+				hasFailed = true
 				allComplete = false
 			default:
 				// For any other status (including "dead"), check exit codes
@@ -902,18 +930,29 @@ func (nc *Client) getJobStatus(nomadJobID string) (string, error) {
 						// This allocation completed successfully (exit code 0)
 						continue
 					} else if anyFailed {
-						return "failed", nil
+						hasFailed = true
 					}
 				}
 				allComplete = false
 			}
 		}
 
+		// Determine status based on allocation states
+		// Running allocations take priority - job is working
 		if hasRunning {
 			return "running", nil
 		}
+		// Pending allocations mean Nomad is still trying to schedule
+		if hasPending {
+			return "pending", nil
+		}
 		if allComplete {
 			return "complete", nil
+		}
+		// Only report failed if there are no running/pending allocations
+		// This handles the case where Nomad is rescheduling after initial failures
+		if hasFailed && !hasRunning && !hasPending {
+			return "failed", nil
 		}
 	}
 	

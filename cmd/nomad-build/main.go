@@ -881,7 +881,12 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
+			// Command failed to start (not found, permission denied, etc.)
 			exitCode = -1
+			// Include the actual error in stderr for debugging
+			errorMsg := fmt.Sprintf("Command execution error: %v", err)
+			fmt.Fprintf(os.Stderr, "%s\n", errorMsg)
+			stderr.WriteString(errorMsg + "\n")
 		}
 	}
 
