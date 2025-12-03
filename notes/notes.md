@@ -219,3 +219,143 @@ Perfect! Now let's provide information about the cleanup script for the existing
   From now on with v0.5.22, temporary images will be automatically deleted when jobs finish. The empty catalog entries are harmless - they're just metadata. You
   can optionally run a periodic cron job to keep the registry pristine, but it's not necessary for functionality.
 
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Add Python External Test Support for Web Services
+
+ Summary
+
+ Add a new test mode that launches a container as a running service and executes Python tests against it externally via python-executor. This is appropriate for
+ web services where API testing needs to happen from outside the container.
+
+ User Requirements (Confirmed)
+
+ - Test code location: In the Git repo (e.g., tests/ folder)
+ - Execution: python-executor CLI runs on user's machine, talks to remote python-executor server
+ - Service discovery: Environment variables (SERVICE_HOST, SERVICE_PORT)
+ - Watch mode: Required (--watch flag mandatory for python tests)
+ - Health check: Required - poll endpoint before tests start
+ - Port exposure: Dynamic host port assigned by Nomad
+
+ New Configuration Options
+
+ test:
+   python_cwd: "tests"                                    # Subfolder in repo with test code
+   python_command: "python-executor run --requirements requirements.txt --file test.py"
+   health_endpoint: "/health"                             # Endpoint to poll (default: /health)
+   health_timeout: 60                                     # Seconds to wait (default: 60)
+   container_port: 8080                                   # Port container exposes (default: 8080)
+
+ Architecture Flow
+
+ 1. User: jobforge submit-job build.yaml --watch (with python test config)
+ 2. Server: Build phase (existing)
+ 3. Server: Start test container as Nomad SERVICE job with dynamic port
+ 4. Server: Status -> TESTING_EXTERNAL with endpoint metadata
+ 5. CLI: Discovers SERVICE_HOST:SERVICE_PORT from job status
+ 6. CLI: Polls health_endpoint until healthy
+ 7. CLI: Runs python-executor with SERVICE_HOST/SERVICE_PORT env vars
+ 8. CLI: Captures stdout/stderr/exit_code
+ 9. CLI: POSTs test results to server (new endpoint)
+ 10. Server: Proceeds to publish if successful, or marks as failed
+ 11. Server: Cleans up test container
+
+ Files to Modify
+
+ 1. pkg/types/job.go (lines 30-42)
+
+ Add to TestConfig struct:
+ PythonCwd       string `json:"python_cwd,omitempty" yaml:"python_cwd,omitempty"`
+ PythonCommand   string `json:"python_command,omitempty" yaml:"python_command,omitempty"`
+ HealthEndpoint  string `json:"health_endpoint,omitempty" yaml:"health_endpoint,omitempty"`
+ HealthTimeout   int    `json:"health_timeout,omitempty" yaml:"health_timeout,omitempty"`
+ ContainerPort   int    `json:"container_port,omitempty" yaml:"container_port,omitempty"`
+
+ Add new status constant (line 8):
+ StatusTestingExternal JobStatus = "TESTING_EXTERNAL"
+
+ Add to Job struct (~line 185):
+ TestServiceHost string `json:"test_service_host,omitempty"`
+ TestServicePort int    `json:"test_service_port,omitempty"`
+ TestJobNomadID  string `json:"test_job_nomad_id,omitempty"`
+
+ 2. pkg/types/mcp.go
+
+ Add new request/response types:
+ - GetTestEndpointResponse - returns SERVICE_HOST, SERVICE_PORT, status
+ - ReportTestResultRequest - CLI sends success/exitCode/stdout/stderr
+ - ReportTestResultResponse - acknowledges result
+
+ 3. internal/nomad/jobs.go (after line 482)
+
+ Add new method:
+ - createExternalTestJobSpec() - creates Nomad "service" job (not batch) with dynamic port allocation
+
+ 4. internal/nomad/client.go
+
+ Modify startTestPhase() - check for python test mode, delegate to new method
+
+ Add new methods:
+ - startExternalTestPhase() - submits service job to Nomad
+ - GetExternalTestEndpoint() - discovers allocated IP:port from running allocation
+ - StopExternalTestJob() - deregisters the service job
+
+ Modify UpdateJobStatus() - handle external test status, populate endpoint info when available
+
+ 5. internal/mcp/server.go
+
+ Add new endpoints:
+ - GET /mcp/job/{job_id}/test-endpoint - returns container endpoint info
+ - POST /mcp/job/{job_id}/test-result - receives test results from CLI
+
+ Add handlers:
+ - handleGetTestEndpoint() - returns ServiceHost/ServicePort
+ - handleReportTestResult() - processes result, triggers publish or fail
+
+ 6. pkg/client/client.go
+
+ Add new client methods:
+ - GetTestEndpoint() - calls test-endpoint API
+ - ReportTestResult() - calls test-result API
+
+ 7. cmd/nomad-build/main.go
+
+ Validate --watch required when python_command is set
+
+ Modify watchJobProgress():
+ - Accept jobConfig parameter
+ - When status becomes TESTING_EXTERNAL, call runPythonTests()
+
+ Add new functions:
+ - runPythonTests() - orchestrates the external test flow:
+   a. Get endpoint from server (with retries)
+   b. Poll health endpoint until healthy
+   c. Run python-executor command with SERVICE_HOST/PORT env vars
+   d. Capture stdout/stderr
+   e. Report results to server
+ - reportTestFailure() - helper to report failures
+
+ 8. docs/JobSpec.md
+
+ Document new configuration options and requirements
+
+ Design Decisions
+
+ 1. Service job type: Use Nomad "service" (not batch) so container stays running
+ 2. Exclusive mode: Python tests cannot combine with commands/entry_point
+ 3. New status: TESTING_EXTERNAL distinguishes from internal tests
+ 4. CLI controls lifecycle: CLI runs tests and reports results, server responds
+
+ Error Handling
+
+ - Container startup timeout: 60s (30 retries x 2s)
+ - Health check timeout: Configurable (default 60s)
+ - Python test timeout: Controlled by python-executor
+ - On any failure: Stop test container, cleanup temp images, release build lock
+
+ Testing Strategy
+
+ 1. Unit tests for new type validations
+ 2. Integration test with mock python-executor
+ 3. End-to-end test with simple HTTP server container
+

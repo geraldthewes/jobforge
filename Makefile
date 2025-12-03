@@ -170,7 +170,8 @@ docker-stop: ## Stop Docker container
 
 nomad-restart: ## Restart the Nomad service to pull latest image
 	@echo "Restarting Nomad service..."
-	@nomad job restart -yes nomad-build-service
+	@nomad job stop -yes nomad-build-service
+	@nomad job start  nomad-build-service
 	@echo "Nomad service restarted successfully"
 
 # Database/Setup targets
