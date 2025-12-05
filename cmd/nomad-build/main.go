@@ -746,6 +746,19 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 				}
 				fmt.Println()
 
+				// Attempt to fetch and display logs for the failed phase
+				var failedPhase string
+				if update.Phase != "" {
+					failedPhase = update.Phase
+				}
+
+				// Display logs for the failed phase if available
+				if failedPhase != "" {
+					// Create a client for displaying logs
+					client := client.NewClient(serviceURL)
+					displayFailedJobLogs(client, jobID, failedPhase)
+				}
+
 				// Write complete history even on failure if history manager is available
 				if historyMgr != nil {
 					if err := writeCompleteHistory(jobID, serviceURL, historyMgr, submissionTime); err != nil {
@@ -1043,4 +1056,39 @@ func readInitialMetadata(buildDir string) (*history.InitialMetadata, error) {
 	}
 
 	return &metadata, nil
+}
+
+// displayFailedJobLogs displays logs for a failed job
+func displayFailedJobLogs(c *client.Client, jobID string, failedPhase string) error {
+	// Attempt to fetch and display logs for the failed phase
+	if failedPhase != "" {
+		logsResp, err := c.GetLogs(jobID, failedPhase)
+		if err == nil {
+			fmt.Printf("Failed phase: %s\n", failedPhase)
+			fmt.Printf("%s logs:\n", strings.Title(failedPhase))
+
+			// Display logs for the failed phase
+			switch failedPhase {
+			case "build":
+				if len(logsResp.Logs.Build) > 0 {
+					for _, logLine := range logsResp.Logs.Build {
+						fmt.Printf("%s\n", logLine)
+					}
+				}
+			case "test":
+				if len(logsResp.Logs.Test) > 0 {
+					for _, logLine := range logsResp.Logs.Test {
+						fmt.Printf("%s\n", logLine)
+					}
+				}
+			case "publish":
+				if len(logsResp.Logs.Publish) > 0 {
+					for _, logLine := range logsResp.Logs.Publish {
+						fmt.Printf("%s\n", logLine)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
