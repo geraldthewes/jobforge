@@ -56,6 +56,7 @@ type JobConfig struct {
 	GitRef                  string   `json:"git_ref" yaml:"git_ref"`
 	GitCredentialsPath      string   `json:"git_credentials_path" yaml:"git_credentials_path"`
 	DockerfilePath          string   `json:"dockerfile_path" yaml:"dockerfile_path"`
+	DockerfileContext       string   `json:"dockerfile_context,omitempty" yaml:"dockerfile_context,omitempty"` // Build context directory (defaults to "." if empty)
 	ImageName               string   `json:"image_name" yaml:"image_name"`
 	ImageTags               []string `json:"image_tags" yaml:"image_tags"`
 	RegistryURL             string   `json:"registry_url" yaml:"registry_url"`

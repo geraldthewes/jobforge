@@ -122,19 +122,25 @@ func (nc *Client) createBuildJobSpec(job *types.Job) (*nomadapi.Job, error) {
 		"",
 	)
 	
+	// Determine build context (default to "." if not specified)
+	buildContext := job.Config.DockerfileContext
+	if buildContext == "" {
+		buildContext = "."
+	}
+
 	// Add build commands for each image name
 	if skipTests {
 		buildCommands = append(buildCommands, "# Build directly with final image names (no tests configured)")
 		for _, imageName := range buildImageNames {
 			buildCommands = append(buildCommands,
-				fmt.Sprintf("buildah bud --isolation=chroot --layers --file %s --tag %s .", 
-					job.Config.DockerfilePath, imageName))
+				fmt.Sprintf("buildah bud --isolation=chroot --layers --file %s --tag %s %s",
+					job.Config.DockerfilePath, imageName, buildContext))
 		}
 	} else {
 		buildCommands = append(buildCommands, "# Build with temporary image name for testing")
 		buildCommands = append(buildCommands,
-			fmt.Sprintf("buildah bud --isolation=chroot --layers --file %s --tag %s .", 
-				job.Config.DockerfilePath, buildImageNames[0]))
+			fmt.Sprintf("buildah bud --isolation=chroot --layers --file %s --tag %s %s",
+				job.Config.DockerfilePath, buildImageNames[0], buildContext))
 	}
 	
 	buildCommands = append(buildCommands,

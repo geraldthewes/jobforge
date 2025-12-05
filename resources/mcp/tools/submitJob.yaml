@@ -34,6 +34,15 @@ input_schema:
       description: "Path to Dockerfile in repository"
       default: "Dockerfile"
 
+    dockerfile_context:
+      type: "string"
+      description: |
+        Build context directory for Docker build. Use when Dockerfile is in a subdirectory
+        and contains COPY commands referencing files relative to that directory.
+        Example: If dockerfile_path is 'myapp/Dockerfile' and files to copy are in 'myapp/',
+        set dockerfile_context to 'myapp/' so COPY commands resolve correctly.
+        Defaults to '.' (repository root) if not specified.
+
     image_name:
       type: "string"
       description: "Base name for the Docker image"

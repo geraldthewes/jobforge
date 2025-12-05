@@ -24,8 +24,33 @@ These fields **must** be provided in every job configuration:
 |-------|------|---------|-------------|
 | `git_ref` | string | `"main"` | Git branch, tag, or commit SHA |
 | `dockerfile_path` | string | `"Dockerfile"` | Path to Dockerfile in repo |
+| `dockerfile_context` | string | `"."` | Build context directory (see below) |
 | `git_credentials_path` | string | - | Vault path for Git credentials |
 | `registry_credentials_path` | string | - | Vault path for registry credentials |
+
+### Dockerfile Context
+
+The `dockerfile_context` field specifies the build context directory for Docker builds. This is essential when:
+- Your Dockerfile is in a subdirectory
+- The Dockerfile contains `COPY` or `ADD` commands that reference files relative to its own directory
+
+**Example:** If your Dockerfile is at `myapp/Dockerfile` and contains `COPY requirements.txt .`, by default the build will fail because it looks for `requirements.txt` at the repository root. Setting `dockerfile_context: myapp/` fixes this by making the build context the `myapp/` directory.
+
+```yaml
+# Dockerfile in subdirectory with relative COPY commands
+dockerfile_path: nvidia-privacy-model-service/Dockerfile.gpu
+dockerfile_context: nvidia-privacy-model-service/
+```
+
+This generates the equivalent of:
+```bash
+docker build -f nvidia-privacy-model-service/Dockerfile.gpu -t image nvidia-privacy-model-service/
+```
+
+**Validation rules:**
+- Must be a relative path (cannot start with `/`)
+- Cannot contain `..` (path traversal is not allowed)
+- Defaults to `.` (repository root) if not specified
 
 ## Optional Fields
 

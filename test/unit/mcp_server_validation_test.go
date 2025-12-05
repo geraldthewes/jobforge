@@ -328,6 +328,45 @@ func TestMCPServerValidationConsistency(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "valid_with_dockerfile_context",
+			mcpArgs: map[string]interface{}{
+				"owner":              "test-org",
+				"repo_url":           "https://github.com/test/repo.git",
+				"image_name":         "test-app",
+				"image_tags":         []interface{}{"latest"},
+				"registry_url":       "registry.example.com/test-app",
+				"dockerfile_path":    "myapp/Dockerfile",
+				"dockerfile_context": "myapp/",
+			},
+			expectError: false,
+		},
+		{
+			name: "dockerfile_context_with_path_traversal",
+			mcpArgs: map[string]interface{}{
+				"owner":              "test-org",
+				"repo_url":           "https://github.com/test/repo.git",
+				"image_name":         "test-app",
+				"image_tags":         []interface{}{"latest"},
+				"registry_url":       "registry.example.com/test-app",
+				"dockerfile_context": "../etc/passwd",
+			},
+			expectError:    true,
+			expectedErrMsg: "dockerfile_context cannot contain '..' (path traversal)",
+		},
+		{
+			name: "dockerfile_context_absolute_path",
+			mcpArgs: map[string]interface{}{
+				"owner":              "test-org",
+				"repo_url":           "https://github.com/test/repo.git",
+				"image_name":         "test-app",
+				"image_tags":         []interface{}{"latest"},
+				"registry_url":       "registry.example.com/test-app",
+				"dockerfile_context": "/absolute/path",
+			},
+			expectError:    true,
+			expectedErrMsg: "dockerfile_context must be a relative path",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -376,6 +415,7 @@ func TestMCPRestParameterParity(t *testing.T) {
 		"git_ref",
 		"git_credentials_path",
 		"dockerfile_path",
+		"dockerfile_context",
 		"image_name",
 		"image_tags",
 		"registry_url",
@@ -502,6 +542,9 @@ func convertMCPArgsToJobConfig(args map[string]interface{}) *types.JobConfig {
 		jobConfig.DockerfilePath = dockerfile
 	} else {
 		jobConfig.DockerfilePath = "Dockerfile"
+	}
+	if dockerfileContext, ok := args["dockerfile_context"].(string); ok {
+		jobConfig.DockerfileContext = dockerfileContext
 	}
 	if imageName, ok := args["image_name"].(string); ok {
 		jobConfig.ImageName = imageName
@@ -637,6 +680,17 @@ func validateJobConfigStrict(config *types.JobConfig) error {
 	}
 	if config.DockerfilePath == "" {
 		return &ValidationError{"dockerfile_path is required"}
+	}
+	// Validate dockerfile_context if provided (optional field)
+	if config.DockerfileContext != "" {
+		// Prevent path traversal attacks
+		if strings.Contains(config.DockerfileContext, "..") {
+			return &ValidationError{"dockerfile_context cannot contain '..' (path traversal)"}
+		}
+		// Must be a relative path (not absolute)
+		if strings.HasPrefix(config.DockerfileContext, "/") {
+			return &ValidationError{"dockerfile_context must be a relative path"}
+		}
 	}
 	if config.ImageName == "" {
 		return &ValidationError{"image_name is required"}

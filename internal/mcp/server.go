@@ -1588,6 +1588,17 @@ func validateJobConfig(config *types.JobConfig) error {
 	if config.DockerfilePath == "" {
 		return fmt.Errorf("dockerfile_path is required")
 	}
+	// Validate dockerfile_context if provided (optional field)
+	if config.DockerfileContext != "" {
+		// Prevent path traversal attacks
+		if strings.Contains(config.DockerfileContext, "..") {
+			return fmt.Errorf("dockerfile_context cannot contain '..' (path traversal)")
+		}
+		// Must be a relative path (not absolute)
+		if strings.HasPrefix(config.DockerfileContext, "/") {
+			return fmt.Errorf("dockerfile_context must be a relative path")
+		}
+	}
 	if config.ImageName == "" {
 		return fmt.Errorf("image_name is required")
 	}
