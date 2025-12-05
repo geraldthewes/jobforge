@@ -1,5 +1,8 @@
-## MODIFIED Requirements
+# nomad-build-service Specification
 
+## Purpose
+TBD - created by archiving change add-dockerfile-context. Update Purpose after archive.
+## Requirements
 ### Requirement: Build Phase (FR2)
 
 The build phase SHALL use Nomad batch jobs with the `quay.io/buildah/stable` image to clone Git repositories and execute `buildah bud`. The system SHALL support build caching via persistent host volume, temporary image tagging for test phase, and custom build context directory via `dockerfile_context` configuration.
@@ -23,3 +26,4 @@ The build phase SHALL use Nomad batch jobs with the `quay.io/buildah/stable` ima
 - **AND** the Dockerfile contains `COPY requirements.txt .`
 - **THEN** the build successfully copies `subdir/requirements.txt` into the image
 - **AND** the equivalent command is `buildah bud -f subdir/Dockerfile --tag <image> subdir/`
+
