@@ -649,7 +649,18 @@ func handleHealth(c *client.Client, args []string) error {
 // If jobConfig is provided and has python_command, runs python tests when status is TESTING_EXTERNAL
 func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manager, submissionTime time.Time, jobConfig *types.JobConfig) error {
 	fmt.Printf("Watching job: %s\n", jobID)
-	fmt.Printf("Service URL: %s\n\n", serviceURL)
+	fmt.Printf("Service URL: %s\n", serviceURL)
+
+	// Display the Docker image being built if available
+	if jobConfig != nil && jobConfig.ImageName != "" {
+		imageName := jobConfig.ImageName
+		if jobConfig.RegistryURL != "" {
+			fmt.Printf("Building: %s/%s\n", jobConfig.RegistryURL, imageName)
+		} else {
+			fmt.Printf("Building: %s\n", imageName)
+		}
+	}
+	fmt.Println()
 
 	// Create Consul client
 	consulClient, err := consul.NewClient("")
