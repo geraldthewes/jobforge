@@ -1052,27 +1052,34 @@ func (nc *Client) getTaskLogs(allocID, taskName, logType string) ([]string, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to get allocation info for %s: %w", allocID, err)
 	}
-	
+
+	// Create cancel channel for timeout handling
+	cancelCh := make(chan struct{})
+
 	// Use the correct Logs API signature
 	logStreamChan, errChan := nc.client.AllocFS().Logs(
 		alloc,     // *Allocation
 		false,     // follow
-		taskName,  // task name 
+		taskName,  // task name
 		logType,   // log type (stdout/stderr)
 		"start",   // origin
 		0,         // offset
-		make(chan struct{}), // cancel chan
+		cancelCh,  // cancel chan
 		nil,       // query options
 	)
-	
+
 	var logs []string
-	
-	// Read from both stream and error channels
+
+	// Use timeout for dead allocations - prevents hanging on unusual cases
+	// 5 seconds is generous for completed allocations
+	timeout := time.After(5 * time.Second)
+
+	// Read from stream, error, and timeout channels
 	for {
 		select {
 		case frame, ok := <-logStreamChan:
 			if !ok {
-				// Channel closed, we're done
+				// Channel closed properly - we have all logs
 				return logs, nil
 			}
 			if frame.Data != nil && len(frame.Data) > 0 {
@@ -1085,10 +1092,9 @@ func (nc *Client) getTaskLogs(allocID, taskName, logType string) ([]string, erro
 					}
 				}
 			}
-			// Since we're not following, we can break after receiving some data
-			if len(frame.Data) == 0 && len(logs) > 0 {
-				return logs, nil
-			}
+			// Wait for channel to close properly instead of returning early on empty frames
+			// This ensures we capture all logs from short-lived or failed tasks
+
 		case err, ok := <-errChan:
 			if !ok {
 				// Error channel closed
@@ -1097,6 +1103,11 @@ func (nc *Client) getTaskLogs(allocID, taskName, logType string) ([]string, erro
 			if err != nil {
 				return logs, fmt.Errorf("error reading logs: %w", err)
 			}
+
+		case <-timeout:
+			// Timeout reached - return what we have and signal cancellation
+			close(cancelCh)
+			return logs, nil
 		}
 	}
 }
