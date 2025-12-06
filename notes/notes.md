@@ -359,3 +359,326 @@ Here is Claude's plan:
  2. Integration test with mock python-executor
  3. End-to-end test with simple HTTP server container
 
+
+ Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Fix Test Phase Log Retrieval for Failed Jobs
+
+ Problem Summary
+
+ When a test container fails (e.g., exit code 127 "uvicorn: not found"), the getLogs API returns empty test logs even though Nomad has the logs available (visible
+ via nomad alloc logs -stderr).
+
+ Root Cause
+
+ The bug is in getTaskLogs() at internal/nomad/client.go:1049-1102:
+
+ // Lines 1088-1091 - PROBLEMATIC EARLY RETURN
+ if len(frame.Data) == 0 && len(logs) > 0 {
+     return logs, nil  // Returns prematurely!
+ }
+
+ For short-lived, failed tasks:
+ 1. The streaming Logs API sends frames in chunks
+ 2. An empty frame can be sent before all log data is delivered
+ 3. The code returns early, missing remaining log data
+ 4. For very fast failures (exit code 127), the task may exit before logs are buffered to the stream
+
+ Proposed Fix
+
+ Modify getTaskLogs() to:
+ 1. Remove the premature return on empty frames
+ 2. Add a timeout to prevent infinite blocking on dead allocations
+ 3. Wait for channel close which properly signals end of stream
+
+ Code Changes
+
+ File: internal/nomad/client.go
+
+ Function: getTaskLogs() (lines 1049-1102)
+
+ Replace the current streaming logic with a timeout-based approach:
+
+ func (nc *Client) getTaskLogs(allocID, taskName, logType string) ([]string, error) {
+     alloc, _, err := nc.client.Allocations().Info(allocID, nil)
+     if err != nil {
+         return nil, fmt.Errorf("failed to get allocation info for %s: %w", allocID, err)
+     }
+
+     cancelCh := make(chan struct{})
+     logStreamChan, errChan := nc.client.AllocFS().Logs(
+         alloc, false, taskName, logType, "start", 0, cancelCh, nil,
+     )
+
+     var logs []string
+
+     // Use timeout for dead allocations - they won't stream indefinitely
+     timeout := time.After(5 * time.Second)
+
+     for {
+         select {
+         case frame, ok := <-logStreamChan:
+             if !ok {
+                 // Channel closed properly - we have all logs
+                 return logs, nil
+             }
+             if frame.Data != nil && len(frame.Data) > 0 {
+                 content := string(frame.Data)
+                 lines := strings.Split(content, "\n")
+                 for _, line := range lines {
+                     if strings.TrimSpace(line) != "" {
+                         logs = append(logs, line)
+                     }
+                 }
+             }
+             // REMOVED: Early return on empty frame - wait for channel close
+
+         case err, ok := <-errChan:
+             if !ok {
+                 return logs, nil
+             }
+             if err != nil {
+                 return logs, fmt.Errorf("error reading logs: %w", err)
+             }
+
+         case <-timeout:
+             // Timeout reached - return what we have
+             close(cancelCh) // Signal cancellation
+             return logs, nil
+         }
+     }
+ }
+
+ Why This Fixes It
+
+ 1. Removes premature return: No longer returns early on empty frames
+ 2. Proper stream completion: Waits for channel close which indicates all data sent
+ 3. Timeout safety: Prevents hanging on unusual cases (5 seconds is generous for dead allocations)
+ 4. Works for all allocation states: Running, completed, or failed
+
+ Additional Enhancement (Optional)
+
+ Add logging when logs are empty but allocation has failure info to aid debugging:
+
+ In getJobLogs() (around line 1024), enhance the fallback to explicitly note that log retrieval failed:
+
+ if len(allLogs) == 0 {
+     nc.logger.WithField("job_id", nomadJobID).Warn("No task logs retrieved from allocation, adding failure info")
+     // ... existing fallback code
+ }
+
+ Testing
+
+ 1. Deploy the fix: REGISTRY_URL=registry.cluster:5000 make docker-push && make nomad-restart
+ 2. Submit a job that will fail quickly (e.g., missing command)
+ 3. Verify jobforge get-logs <job-id> shows the stderr output
+ 4. Run integration tests: go test ./...
+
+ Files to Modify
+
+ - internal/nomad/client.go - getTaskLogs() function (primary fix)
+
+
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Multiple Allocation Warnings for Jobforge CLI
+
+ Summary
+
+ Add warnings to jobforge CLI when Nomad launches multiple allocations for any phase (build, test, publish). Display in both --watch mode and get-status with
+ verbose details.
+
+ Files to Modify
+
+ | File                     | Change                                     |
+ |--------------------------|--------------------------------------------|
+ | pkg/types/job.go         | Add allocation tracking types              |
+ | pkg/types/mcp.go         | Add Allocations field to GetStatusResponse |
+ | internal/nomad/client.go | Add GetJobAllocations() method             |
+ | internal/mcp/server.go   | Include allocations in status responses    |
+ | cmd/nomad-build/main.go  | Add warning display for both modes         |
+
+ Implementation Steps
+
+ Step 1: Add Data Structures (pkg/types/job.go)
+
+ Add new types after line 376:
+
+ // AllocationInfo represents details about a Nomad allocation
+ type AllocationInfo struct {
+     ID            string            `json:"id"`
+     FullID        string            `json:"full_id"`
+     ClientStatus  string            `json:"client_status"`
+     DesiredStatus string            `json:"desired_status"`
+     NodeID        string            `json:"node_id"`
+     NodeName      string            `json:"node_name"`
+     CreatedAt     time.Time         `json:"created_at"`
+     ModifiedAt    time.Time         `json:"modified_at"`
+     FailedReason  string            `json:"failed_reason,omitempty"`
+     TaskStates    map[string]TaskStateInfo `json:"task_states,omitempty"`
+ }
+
+ type TaskStateInfo struct {
+     State       string `json:"state"`
+     Failed      bool   `json:"failed"`
+     LastEvent   string `json:"last_event"`
+     LastMessage string `json:"last_message"`
+ }
+
+ type PhaseAllocations struct {
+     Phase           string           `json:"phase"`
+     NomadJobID      string           `json:"nomad_job_id"`
+     AllocationCount int              `json:"allocation_count"`
+     Allocations     []AllocationInfo `json:"allocations"`
+     HasWarning      bool             `json:"has_warning"`
+     WarningMessage  string           `json:"warning_message,omitempty"`
+ }
+
+ type JobAllocations struct {
+     Build         *PhaseAllocations   `json:"build,omitempty"`
+     Test          []PhaseAllocations  `json:"test,omitempty"`
+     Publish       *PhaseAllocations   `json:"publish,omitempty"`
+     HasAnyWarning bool                `json:"has_any_warning"`
+ }
+
+ Step 2: Update GetStatusResponse (pkg/types/mcp.go)
+
+ Add Allocations field to line 27:
+
+ type GetStatusResponse struct {
+     JobID       string          `json:"job_id"`
+     Status      JobStatus       `json:"status"`
+     Config      *JobConfig      `json:"config,omitempty"`
+     Metrics     JobMetrics      `json:"metrics"`
+     Error       string          `json:"error,omitempty"`
+     Allocations *JobAllocations `json:"allocations,omitempty"` // NEW
+ }
+
+ Step 3: Add Nomad Allocation Fetching (internal/nomad/client.go)
+
+ Add two new methods:
+
+ 1. GetJobAllocations(job *types.Job) (*types.JobAllocations, error) - Orchestrates allocation fetching for all phases
+ 2. getPhaseAllocations(nomadJobID, phase string) (*types.PhaseAllocations, error) - Gets allocations for a single Nomad job
+
+ Key logic:
+ - Use existing nc.client.Jobs().Allocations(nomadJobID, false, nil)
+ - Set HasWarning = true when len(allocs) > 1
+ - Extract failure reasons from alloc.TaskStates[*].Events
+ - Get node names via nc.client.Nodes().Info(alloc.NodeID, nil)
+
+ Step 4: Update MCP Server (internal/mcp/server.go)
+
+ In handleGetStatus and handleJobStatus:
+ - Call s.nomadClient.GetJobAllocations(job)
+ - Add result to response's Allocations field
+ - Handle errors gracefully (log warning, don't fail request)
+
+ Step 5: Add CLI Display (cmd/nomad-build/main.go)
+
+ Add displayAllocationWarnings(allocations *types.JobAllocations) function that:
+ - Returns early if allocations == nil || !allocations.HasAnyWarning
+ - Prints formatted warning block with:
+   - Phase name (BUILD/TEST/PUBLISH)
+   - Allocation count and warning message
+   - For each allocation: ID, status, node, created time, failure reason
+
+ Update handleGetStatus:
+ - Call displayAllocationWarnings(response.Allocations) before JSON output
+
+ Update watchJobProgress:
+ - Track lastAllocWarningShown flag
+ - Show warnings once per phase change when HasAnyWarning
+
+ Warning Output Format
+
+ ============================================================
+ WARNING: Multiple allocations detected
+ ============================================================
+
+ [BUILD Phase] Multiple allocations detected for build phase: 3 allocations (expected 1). This may indicate scheduling issues, node failures, or resource
+ constraints.
+   Nomad Job: build-abc123
+   Allocations:
+     1. ID: a1b2c3d4
+        Status: failed (desired: run)
+        Node: worker-1 (node123)
+        Created: 2025-12-06T10:30:00Z
+        Failed: Terminated: exit code 1
+     2. ID: e5f6g7h8
+        Status: failed (desired: run)
+        Node: worker-2 (node456)
+        Created: 2025-12-06T10:31:00Z
+        Failed: Terminated: OOM killed
+     3. ID: i9j0k1l2
+        Status: running (desired: run)
+        Node: worker-3 (node789)
+        Created: 2025-12-06T10:32:00Z
+ ============================================================
+
+ Testing
+
+ 1. Unit tests for new GetJobAllocations() method
+ 2. Manual testing by intentionally causing allocation failures
+ 3. Verify warning appears in both --watch and get-status modes
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+● All unit tests pass. The integration test failure appears to be a pre-existing issue with TestConsulJobWatcher which didn't complete the full flow to
+  SUCCEEDED status - this is unrelated to the allocation warning feature.
+
+● Implementation Complete
+
+  I've implemented the multiple allocation warning feature for the jobforge CLI. Here's a summary of the changes:
+
+  Files Modified
+
+  | File                     | Changes                                                                                          |
+  |--------------------------|--------------------------------------------------------------------------------------------------|
+  | pkg/types/job.go         | Added AllocationInfo, TaskStateInfo, PhaseAllocations, and JobAllocations types                  |
+  | pkg/types/mcp.go         | Added Allocations field to GetStatusResponse                                                     |
+  | internal/nomad/client.go | Added GetJobAllocations() and getPhaseAllocations() methods                                      |
+  | internal/mcp/server.go   | Updated handleGetStatus and handleJobStatus to include allocations                               |
+  | cmd/nomad-build/main.go  | Added displayAllocationWarnings() function, integrated into handleGetStatus and watchJobProgress |
+
+  Features
+
+  1. get-status command: Now displays allocation warnings before JSON output when multiple allocations detected
+  2. --watch mode: Fetches and displays allocation warnings on each phase change
+  3. Verbose details include:
+    - Phase name (BUILD/TEST/PUBLISH)
+    - Nomad job ID
+    - Allocation count and warning message
+    - For each allocation: ID, status, desired status, node name/ID, creation time, failure reason
+
+  Example Output
+
+  ============================================================
+  WARNING: Multiple allocations detected
+  ============================================================
+
+  [BUILD Phase] Multiple allocations detected for build phase: 3 allocations (expected 1). This may indicate scheduling issues, node failures, or resource
+  constraints.
+    Nomad Job: build-abc123
+    Allocations:
+      1. ID: a1b2c3d4
+         Status: failed (desired: run)
+         Node: worker-1 (node123)
+         Created: 2025-12-06T10:30:00Z
+         Failed: Terminated: exit code 1
+      2. ID: e5f6g7h8
+         Status: running (desired: run)
+         Node: worker-2 (node456)
+         Created: 2025-12-06T10:31:00Z
+  ============================================================
+
+  Build Status
+
+  - Build: ✅ Successful
+  - Unit tests: ✅ All passing (27 tests)
+  - Integration test: ⚠️ Pre-existing failure in TestConsulJobWatcher (unrelated to this feature)
+
+  Would you like me to deploy this to test on the cluster?
+
+
