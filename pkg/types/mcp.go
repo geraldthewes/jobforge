@@ -20,11 +20,12 @@ type GetStatusRequest struct {
 
 // GetStatusResponse represents the response to a status request
 type GetStatusResponse struct {
-	JobID   string     `json:"job_id"`
-	Status  JobStatus  `json:"status"`
-	Config  *JobConfig `json:"config,omitempty"` // Include config for debugging
-	Metrics JobMetrics `json:"metrics"`
-	Error   string     `json:"error,omitempty"`
+	JobID       string          `json:"job_id"`
+	Status      JobStatus       `json:"status"`
+	Config      *JobConfig      `json:"config,omitempty"` // Include config for debugging
+	Metrics     JobMetrics      `json:"metrics"`
+	Error       string          `json:"error,omitempty"`
+	Allocations *JobAllocations `json:"allocations,omitempty"` // Allocation details with warnings
 }
 
 // GetLogsRequest represents an MCP request to get job logs

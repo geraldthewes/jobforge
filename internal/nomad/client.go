@@ -1804,6 +1804,132 @@ func (nc *Client) capturePhaseLogs(job *types.Job, phase string) error {
 	default:
 		return fmt.Errorf("unknown phase: %s", phase)
 	}
-	
+
 	return nil
+}
+
+// GetJobAllocations retrieves detailed allocation information for all phases of a job
+func (nc *Client) GetJobAllocations(job *types.Job) (*types.JobAllocations, error) {
+	allocations := &types.JobAllocations{}
+
+	// Get build phase allocations
+	if job.BuildJobID != "" {
+		phaseAllocs, err := nc.getPhaseAllocations(job.BuildJobID, "build")
+		if err != nil {
+			nc.logger.WithError(err).WithField("job_id", job.BuildJobID).Warn("Failed to get build allocations")
+		} else {
+			allocations.Build = phaseAllocs
+			if phaseAllocs.HasWarning {
+				allocations.HasAnyWarning = true
+			}
+		}
+	}
+
+	// Get test phase allocations (multiple test jobs)
+	for _, testJobID := range job.TestJobIDs {
+		phaseAllocs, err := nc.getPhaseAllocations(testJobID, "test")
+		if err != nil {
+			nc.logger.WithError(err).WithField("job_id", testJobID).Warn("Failed to get test allocations")
+			continue
+		}
+		allocations.Test = append(allocations.Test, *phaseAllocs)
+		if phaseAllocs.HasWarning {
+			allocations.HasAnyWarning = true
+		}
+	}
+
+	// Also check external test job if present
+	if job.TestJobNomadID != "" {
+		phaseAllocs, err := nc.getPhaseAllocations(job.TestJobNomadID, "test")
+		if err != nil {
+			nc.logger.WithError(err).WithField("job_id", job.TestJobNomadID).Warn("Failed to get external test allocations")
+		} else {
+			allocations.Test = append(allocations.Test, *phaseAllocs)
+			if phaseAllocs.HasWarning {
+				allocations.HasAnyWarning = true
+			}
+		}
+	}
+
+	// Get publish phase allocations
+	if job.PublishJobID != "" {
+		phaseAllocs, err := nc.getPhaseAllocations(job.PublishJobID, "publish")
+		if err != nil {
+			nc.logger.WithError(err).WithField("job_id", job.PublishJobID).Warn("Failed to get publish allocations")
+		} else {
+			allocations.Publish = phaseAllocs
+			if phaseAllocs.HasWarning {
+				allocations.HasAnyWarning = true
+			}
+		}
+	}
+
+	return allocations, nil
+}
+
+// getPhaseAllocations retrieves allocation details for a specific Nomad job
+func (nc *Client) getPhaseAllocations(nomadJobID, phase string) (*types.PhaseAllocations, error) {
+	allocs, _, err := nc.client.Jobs().Allocations(nomadJobID, false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get allocations: %w", err)
+	}
+
+	phaseAllocs := &types.PhaseAllocations{
+		Phase:           phase,
+		NomadJobID:      nomadJobID,
+		AllocationCount: len(allocs),
+		Allocations:     make([]types.AllocationInfo, 0, len(allocs)),
+	}
+
+	for _, alloc := range allocs {
+		info := types.AllocationInfo{
+			ID:            alloc.ID[:8], // Short ID for display
+			FullID:        alloc.ID,
+			ClientStatus:  alloc.ClientStatus,
+			DesiredStatus: alloc.DesiredStatus,
+			NodeID:        alloc.NodeID,
+			CreatedAt:     time.Unix(0, alloc.CreateTime),
+			ModifiedAt:    time.Unix(0, alloc.ModifyTime),
+		}
+
+		// Get node name if possible
+		if alloc.NodeID != "" {
+			if node, _, err := nc.client.Nodes().Info(alloc.NodeID, nil); err == nil && node != nil {
+				info.NodeName = node.Name
+			}
+		}
+
+		// Get failure reason from task states
+		if alloc.ClientStatus == "failed" && alloc.TaskStates != nil {
+			info.TaskStates = make(map[string]types.TaskStateInfo)
+			for taskName, taskState := range alloc.TaskStates {
+				taskInfo := types.TaskStateInfo{
+					State:  taskState.State,
+					Failed: taskState.Failed,
+				}
+				if len(taskState.Events) > 0 {
+					lastEvent := taskState.Events[len(taskState.Events)-1]
+					taskInfo.LastEvent = lastEvent.Type
+					taskInfo.LastMessage = lastEvent.DisplayMessage
+					if taskState.Failed {
+						info.FailedReason = fmt.Sprintf("%s: %s", lastEvent.Type, lastEvent.DisplayMessage)
+					}
+				}
+				info.TaskStates[taskName] = taskInfo
+			}
+		}
+
+		phaseAllocs.Allocations = append(phaseAllocs.Allocations, info)
+	}
+
+	// Set warning if multiple allocations
+	if len(allocs) > 1 {
+		phaseAllocs.HasWarning = true
+		phaseAllocs.WarningMessage = fmt.Sprintf(
+			"Multiple allocations detected for %s phase: %d allocations (expected 1). "+
+				"This may indicate scheduling issues, node failures, or resource constraints.",
+			phase, len(allocs))
+	}
+
+	return phaseAllocs, nil
 }

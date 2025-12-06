@@ -306,15 +306,23 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 			s.logger.WithError(err).Warn("Failed to update job in storage")
 		}
 	}
-	
-	response := types.GetStatusResponse{
-		JobID:   job.ID,
-		Status:  job.Status,
-		Config:  &job.Config, // Include config for debugging
-		Metrics: job.Metrics,
-		Error:   job.Error,
+
+	// Get allocation information for warnings
+	allocations, err := s.nomadClient.GetJobAllocations(job)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to get job allocations")
+		// Continue without allocations - not a fatal error
 	}
-	
+
+	response := types.GetStatusResponse{
+		JobID:       job.ID,
+		Status:      job.Status,
+		Config:      &job.Config, // Include config for debugging
+		Metrics:     job.Metrics,
+		Error:       job.Error,
+		Allocations: allocations,
+	}
+
 	s.writeJSONResponse(w, response)
 }
 
@@ -1824,13 +1832,21 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request, jobID s
 		// Continue with existing job data rather than failing
 		updatedJob = job
 	}
-	
+
+	// Get allocation information for warnings
+	allocations, err := s.nomadClient.GetJobAllocations(updatedJob)
+	if err != nil {
+		s.logger.WithError(err).WithField("job_id", jobID).Warn("Failed to get job allocations")
+		// Continue without allocations - not a fatal error
+	}
+
 	response := types.GetStatusResponse{
-		JobID:   updatedJob.ID,
-		Status:  updatedJob.Status,
-		Config:  &updatedJob.Config, // Include config for debugging
-		Metrics: updatedJob.Metrics,
-		Error:   updatedJob.Error,
+		JobID:       updatedJob.ID,
+		Status:      updatedJob.Status,
+		Config:      &updatedJob.Config, // Include config for debugging
+		Metrics:     updatedJob.Metrics,
+		Error:       updatedJob.Error,
+		Allocations: allocations,
 	}
 	
 	w.Header().Set("Content-Type", "application/json")

@@ -374,3 +374,43 @@ const (
 	WebhookEventJobCompleted   WebhookEvent = "job.completed"
 	WebhookEventJobFailed      WebhookEvent = "job.failed"
 )
+
+// AllocationInfo represents details about a Nomad allocation
+type AllocationInfo struct {
+	ID            string                   `json:"id"`              // Short allocation ID for display
+	FullID        string                   `json:"full_id"`         // Full allocation ID
+	ClientStatus  string                   `json:"client_status"`   // running, pending, complete, failed, lost
+	DesiredStatus string                   `json:"desired_status"`  // run, stop, evict
+	NodeID        string                   `json:"node_id"`         // Node where allocation is placed
+	NodeName      string                   `json:"node_name"`       // Human-readable node name
+	CreatedAt     time.Time                `json:"created_at"`      // When allocation was created
+	ModifiedAt    time.Time                `json:"modified_at"`     // Last modification time
+	FailedReason  string                   `json:"failed_reason,omitempty"`  // Why it failed (if applicable)
+	TaskStates    map[string]TaskStateInfo `json:"task_states,omitempty"`    // Per-task state info
+}
+
+// TaskStateInfo represents state of a task within an allocation
+type TaskStateInfo struct {
+	State       string `json:"state"`        // pending, running, dead
+	Failed      bool   `json:"failed"`       // Whether task failed
+	LastEvent   string `json:"last_event"`   // Last event type
+	LastMessage string `json:"last_message"` // Last event message
+}
+
+// PhaseAllocations represents allocation information for a phase
+type PhaseAllocations struct {
+	Phase           string           `json:"phase"`             // build, test, publish
+	NomadJobID      string           `json:"nomad_job_id"`      // The Nomad job ID
+	AllocationCount int              `json:"allocation_count"`  // Total allocations for this phase
+	Allocations     []AllocationInfo `json:"allocations"`       // Detailed allocation info
+	HasWarning      bool             `json:"has_warning"`       // True if count > 1
+	WarningMessage  string           `json:"warning_message,omitempty"` // Human-readable warning
+}
+
+// JobAllocations contains allocation info for all phases of a job
+type JobAllocations struct {
+	Build         *PhaseAllocations  `json:"build,omitempty"`
+	Test          []PhaseAllocations `json:"test,omitempty"`   // Multiple for multiple test jobs
+	Publish       *PhaseAllocations  `json:"publish,omitempty"`
+	HasAnyWarning bool               `json:"has_any_warning"`  // True if any phase has warning
+}

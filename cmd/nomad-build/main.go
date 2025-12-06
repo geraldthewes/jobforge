@@ -453,6 +453,51 @@ func parseConfigData(data string) (*types.JobConfig, error) {
 	return &jobConfig, nil
 }
 
+// displayAllocationWarnings prints allocation warnings to the console
+func displayAllocationWarnings(allocations *types.JobAllocations) {
+	if allocations == nil || !allocations.HasAnyWarning {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println("WARNING: Multiple allocations detected")
+	fmt.Println(strings.Repeat("=", 60))
+
+	displayPhaseAllocations := func(phase *types.PhaseAllocations) {
+		if phase == nil || !phase.HasWarning {
+			return
+		}
+
+		fmt.Printf("\n[%s Phase] %s\n", strings.ToUpper(phase.Phase), phase.WarningMessage)
+		fmt.Printf("  Nomad Job: %s\n", phase.NomadJobID)
+		fmt.Println("  Allocations:")
+
+		for i, alloc := range phase.Allocations {
+			fmt.Printf("    %d. ID: %s\n", i+1, alloc.ID)
+			fmt.Printf("       Status: %s (desired: %s)\n", alloc.ClientStatus, alloc.DesiredStatus)
+			if alloc.NodeName != "" {
+				fmt.Printf("       Node: %s (%s)\n", alloc.NodeName, alloc.NodeID[:8])
+			} else if alloc.NodeID != "" {
+				fmt.Printf("       Node: %s\n", alloc.NodeID[:8])
+			}
+			fmt.Printf("       Created: %s\n", alloc.CreatedAt.Format(time.RFC3339))
+			if alloc.FailedReason != "" {
+				fmt.Printf("       Failed: %s\n", alloc.FailedReason)
+			}
+		}
+	}
+
+	displayPhaseAllocations(allocations.Build)
+	for i := range allocations.Test {
+		displayPhaseAllocations(&allocations.Test[i])
+	}
+	displayPhaseAllocations(allocations.Publish)
+
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+}
+
 func handleGetStatus(c *client.Client, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("job ID required")
@@ -463,6 +508,9 @@ func handleGetStatus(c *client.Client, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get status: %w", err)
 	}
+
+	// Display allocation warnings if present
+	displayAllocationWarnings(response.Allocations)
 
 	// Output response
 	output, err := json.MarshalIndent(response, "", "  ")
@@ -706,6 +754,14 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 				}
 
 				fmt.Println()
+
+				// Check for allocation warnings when phase changes
+				if update.Phase != lastPhase {
+					c := client.NewClient(serviceURL)
+					if statusResp, err := c.GetStatus(jobID); err == nil && statusResp.Allocations != nil {
+						displayAllocationWarnings(statusResp.Allocations)
+					}
+				}
 
 				lastStatus = update.Status
 				lastPhase = update.Phase
