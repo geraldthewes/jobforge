@@ -374,6 +374,65 @@ The service validates:
 - Each secret must have at least one field mapping
 - Field names and environment variable names cannot be empty
 
+### External Python Tests
+
+For web services that need API testing from outside the container, you can run external Python tests using `python-executor`. The container runs as a long-lived service while tests execute on the CLI machine.
+
+#### When to Use
+
+- Testing REST APIs or GraphQL endpoints
+- Integration tests that need to hit the service over HTTP
+- Tests that require external tooling not available inside the container
+
+#### Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `test.python_command` | string | - | Command to run (e.g., `"python-executor run --file test.py"`) |
+| `test.python_cwd` | string | - | Working directory for tests (relative to repo root) |
+| `test.health_endpoint` | string | `/health` | Health check endpoint before running tests |
+| `test.health_timeout` | integer | `60` | Seconds to wait for health check |
+| `test.container_port` | integer | `8080` | Port the container exposes |
+
+#### Example
+
+```yaml
+test:
+  python_cwd: "tests"
+  python_command: "python-executor run --file test_api.py"
+  health_endpoint: "/health"
+  health_timeout: 120
+  container_port: 8080
+  env:
+    LOG_LEVEL: "debug"
+```
+
+#### Requirements
+
+- **`--watch` flag is required**: Python tests require the CLI to orchestrate test execution
+- **`python-executor` must be installed** on the machine running the CLI
+- **Container must expose HTTP health endpoint** that responds with 2xx when ready
+- **Exclusive mode**: Cannot combine with `commands` or `entry_point`
+
+#### How It Works
+
+1. Container starts as a Nomad service job (stays running)
+2. CLI polls the health endpoint until it responds with 2xx
+3. CLI runs `python_command` with environment variables:
+   - `SERVICE_HOST` - IP address of the running container
+   - `SERVICE_PORT` - Dynamic port assigned by Nomad
+4. Test results are reported back to the server
+5. If tests pass, publish phase continues; otherwise, job fails
+
+#### Usage
+
+```bash
+# Python tests require --watch flag
+jobforge submit-job build.yaml --watch
+```
+
+For complete configuration details, see [docs/JobSpec.md](docs/JobSpec.md#external-python-tests-configuration).
+
 ### GPU-Accelerated Test Configuration
 
 The build service supports running tests on GPU-enabled Nomad nodes for machine learning, video processing, and other GPU-accelerated workloads.
