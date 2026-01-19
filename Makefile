@@ -266,6 +266,7 @@ version-minor: ## Set minor version (use: make version-minor MINOR=1)
 # Installation targets
 install: build ## Install binary to system
 	@echo "Installing ${BINARY_NAME} to /usr/local/bin..."
+	@sudo rm -f /usr/local/bin/${BINARY_NAME}
 	@sudo cp bin/${BINARY_NAME} /usr/local/bin/
 	@sudo chmod +x /usr/local/bin/${BINARY_NAME}
 	@echo "Installation completed"
