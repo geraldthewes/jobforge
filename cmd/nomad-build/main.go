@@ -699,6 +699,11 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 	fmt.Printf("Watching job: %s\n", jobID)
 	fmt.Printf("Service URL: %s\n", serviceURL)
 
+	// Display the repository URL if available
+	if jobConfig != nil && jobConfig.RepoURL != "" {
+		fmt.Printf("Repository: %s\n", jobConfig.RepoURL)
+	}
+
 	// Display the Docker image being built if available
 	if jobConfig != nil && jobConfig.ImageName != "" {
 		imageName := jobConfig.ImageName
@@ -784,6 +789,21 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 			// Check if job reached terminal state
 			if update.Status == types.StatusSucceeded {
 				fmt.Printf("\n✅ Job completed successfully\n")
+
+				// Display the published image details
+				if jobConfig != nil && jobConfig.ImageName != "" {
+					tags := jobConfig.ImageTags
+					if len(tags) == 0 {
+						tags = []string{jobID} // Default tag is job ID
+					}
+					for _, tag := range tags {
+						if jobConfig.RegistryURL != "" {
+							fmt.Printf("Published: %s/%s:%s\n", jobConfig.RegistryURL, jobConfig.ImageName, tag)
+						} else {
+							fmt.Printf("Published: %s:%s\n", jobConfig.ImageName, tag)
+						}
+					}
+				}
 
 				// Write complete history if history manager is available
 				if historyMgr != nil {
