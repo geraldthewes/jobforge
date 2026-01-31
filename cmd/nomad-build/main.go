@@ -1239,7 +1239,7 @@ func handleListLocks(c *client.Client, args []string) error {
 
 	// Print header
 	fmt.Printf("Build Locks (Total: %d, Stale: %d)\n", response.TotalCount, response.StaleCount)
-	fmt.Println(strings.Repeat("-", 100))
+	fmt.Println(strings.Repeat("-", 115))
 
 	if len(response.Locks) == 0 {
 		fmt.Println("No locks found.")
@@ -1247,9 +1247,9 @@ func handleListLocks(c *client.Client, args []string) error {
 	}
 
 	// Print table header
-	fmt.Printf("%-45s %-12s %-10s %-15s %-10s %-5s\n",
-		"LOCK KEY", "JOB ID", "OWNER", "IMAGE", "AGE", "STALE")
-	fmt.Println(strings.Repeat("-", 100))
+	fmt.Printf("%-45s %-12s %-10s %-15s %-10s %-10s %-5s\n",
+		"LOCK KEY", "JOB ID", "OWNER", "IMAGE", "PHASE", "AGE", "STALE")
+	fmt.Println(strings.Repeat("-", 115))
 
 	for _, lock := range response.Locks {
 		jobID := lock.JobID
@@ -1272,6 +1272,11 @@ func handleListLocks(c *client.Client, args []string) error {
 			ownerStr = ownerStr[:10]
 		}
 
+		phaseStr := lock.Phase
+		if len(phaseStr) > 10 {
+			phaseStr = phaseStr[:10]
+		}
+
 		ageStr := formatDuration(lock.Age)
 
 		staleStr := "No"
@@ -1282,8 +1287,8 @@ func handleListLocks(c *client.Client, args []string) error {
 			}
 		}
 
-		fmt.Printf("%-45s %-12s %-10s %-15s %-10s %s\n",
-			lockKey, jobID, ownerStr, imageName, ageStr, staleStr)
+		fmt.Printf("%-45s %-12s %-10s %-15s %-10s %-10s %s\n",
+			lockKey, jobID, ownerStr, imageName, phaseStr, ageStr, staleStr)
 	}
 
 	return nil

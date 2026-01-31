@@ -469,11 +469,12 @@ func (cs *ConsulStorage) ListLocks() ([]types.LockInfo, error) {
 			// Age unknown for legacy locks
 		}
 
-		// Check if the lock is stale by verifying the job status
+		// Check if the lock is stale and get the current phase
 		if lockInfo.JobID != "" {
-			isStale, reason := cs.isLockStale(lockInfo.JobID)
+			isStale, reason, phase := cs.getLockStaleInfoAndPhase(lockInfo.JobID)
 			lockInfo.IsStale = isStale
 			lockInfo.StaleReason = reason
+			lockInfo.Phase = phase
 		} else if pair.Session == "" {
 			// Lock has no session attached (orphaned)
 			lockInfo.IsStale = true
@@ -486,23 +487,46 @@ func (cs *ConsulStorage) ListLocks() ([]types.LockInfo, error) {
 	return locks, nil
 }
 
-// isLockStale checks if a lock is stale by verifying the job status
-func (cs *ConsulStorage) isLockStale(jobID string) (bool, string) {
+// getPhaseFromStatus converts a job status to a human-readable phase string
+func getPhaseFromStatus(status types.JobStatus) string {
+	switch status {
+	case types.StatusPending:
+		return "pending"
+	case types.StatusBuilding:
+		return "build"
+	case types.StatusTesting, types.StatusTestingExternal:
+		return "test"
+	case types.StatusPublishing:
+		return "publish"
+	case types.StatusSucceeded:
+		return "completed"
+	case types.StatusFailed:
+		return "failed"
+	default:
+		return string(status)
+	}
+}
+
+// getLockStaleInfoAndPhase checks if a lock is stale and returns the current phase
+func (cs *ConsulStorage) getLockStaleInfoAndPhase(jobID string) (isStale bool, staleReason string, phase string) {
 	job, err := cs.GetJob(jobID)
 	if err != nil {
 		// Job not found in storage - likely completed and cleaned up
-		return true, "job not found in storage"
+		return true, "job not found in storage", ""
 	}
+
+	// Get phase from job status
+	phase = getPhaseFromStatus(job.Status)
 
 	// Check if job is in a terminal state
 	switch job.Status {
 	case types.StatusSucceeded:
-		return true, "job completed successfully"
+		return true, "job completed successfully", phase
 	case types.StatusFailed:
-		return true, "job failed"
+		return true, "job failed", phase
 	}
 
-	return false, ""
+	return false, "", phase
 }
 
 // GetActiveJobsForOwner returns the count and list of active jobs for a specific owner

@@ -24,9 +24,10 @@ type LockInfo struct {
 	GitRef      string        `json:"git_ref"`
 	RegistryURL string        `json:"registry_url"`
 	AcquiredAt  time.Time     `json:"acquired_at"`
-	Age         time.Duration `json:"age"`          // How long the lock has been held
-	IsStale     bool          `json:"is_stale"`     // True if the job is completed/missing
-	StaleReason string        `json:"stale_reason"` // Why the lock is considered stale
+	Age         time.Duration `json:"age"`                    // How long the lock has been held
+	Phase       string        `json:"phase,omitempty"`        // Current build phase (pending/build/test/publish/completed/failed)
+	IsStale     bool          `json:"is_stale"`               // True if the job is completed/missing
+	StaleReason string        `json:"stale_reason,omitempty"` // Why the lock is considered stale
 }
 
 // ListLocksRequest represents a request to list build locks

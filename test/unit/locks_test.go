@@ -83,6 +83,7 @@ func TestLockInfo(t *testing.T) {
 			GitRef:      "feature",
 			AcquiredAt:  acquiredAt,
 			Age:         5 * time.Minute,
+			Phase:       "build",
 			IsStale:     false,
 			StaleReason: "",
 		}
@@ -93,6 +94,27 @@ func TestLockInfo(t *testing.T) {
 
 		if lockInfo.StaleReason != "" {
 			t.Errorf("Expected empty stale reason, got %s", lockInfo.StaleReason)
+		}
+
+		if lockInfo.Phase != "build" {
+			t.Errorf("Expected phase 'build', got %s", lockInfo.Phase)
+		}
+	})
+
+	t.Run("LockInfo with phase field", func(t *testing.T) {
+		// Test all possible phase values
+		phases := []string{"pending", "build", "test", "publish", "completed", "failed"}
+
+		for _, phase := range phases {
+			lockInfo := types.LockInfo{
+				LockKey: "lock-" + phase,
+				JobID:   "job-" + phase,
+				Phase:   phase,
+			}
+
+			if lockInfo.Phase != phase {
+				t.Errorf("Expected phase '%s', got %s", phase, lockInfo.Phase)
+			}
 		}
 	})
 }

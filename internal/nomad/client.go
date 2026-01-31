@@ -22,6 +22,7 @@ type Client struct {
 	logger  *logrus.Logger
 	storage interface {
 		AcquireLock(lockKey string, timeout time.Duration) (string, error)
+		AcquireLockWithMetadata(lockKey string, timeout time.Duration, metadata *types.LockMetadata) (string, error)
 		ReleaseLock(lockKey, sessionID string) error
 		GenerateImageLockKey(registryURL, imageName, branch string) string
 	}
@@ -30,6 +31,7 @@ type Client struct {
 // NewClient creates a new Nomad client
 func NewClient(cfg *config.Config, storage interface {
 	AcquireLock(lockKey string, timeout time.Duration) (string, error)
+	AcquireLockWithMetadata(lockKey string, timeout time.Duration, metadata *types.LockMetadata) (string, error)
 	ReleaseLock(lockKey, sessionID string) error
 	GenerateImageLockKey(registryURL, imageName, branch string) string
 }) (*Client, error) {
@@ -64,14 +66,27 @@ func NewClient(cfg *config.Config, storage interface {
 
 // CreateJob creates a new build job and starts the build phase
 func (nc *Client) CreateJob(jobConfig *types.JobConfig) (*types.Job, error) {
+	// Generate jobID FIRST so it can be included in lock metadata
+	jobID := uuid.New().String()
+
 	// Generate lock key for this image build
 	lockKey := nc.storage.GenerateImageLockKey(jobConfig.RegistryURL, jobConfig.ImageName, jobConfig.GitRef)
 
-	// Try to acquire lock for this image/branch combination
-	sessionID, err := nc.storage.AcquireLock(lockKey, 30*time.Minute)
+	// Construct metadata for the lock
+	lockMetadata := &types.LockMetadata{
+		JobID:       jobID,
+		Owner:       jobConfig.Owner,
+		RegistryURL: jobConfig.RegistryURL,
+		ImageName:   jobConfig.ImageName,
+		GitRef:      jobConfig.GitRef,
+	}
+
+	// Try to acquire lock with metadata for this image/branch combination
+	sessionID, err := nc.storage.AcquireLockWithMetadata(lockKey, 30*time.Minute, lockMetadata)
 	if err != nil {
 		nc.logger.WithFields(logrus.Fields{
 			"lock_key":      lockKey,
+			"job_id":        jobID,
 			"registry_url":  jobConfig.RegistryURL,
 			"image_name":    jobConfig.ImageName,
 			"git_ref":       jobConfig.GitRef,
@@ -82,12 +97,11 @@ func (nc *Client) CreateJob(jobConfig *types.JobConfig) (*types.Job, error) {
 	nc.logger.WithFields(logrus.Fields{
 		"lock_key":      lockKey,
 		"session_id":    sessionID,
+		"job_id":        jobID,
 		"registry_url":  jobConfig.RegistryURL,
 		"image_name":    jobConfig.ImageName,
 		"git_ref":       jobConfig.GitRef,
-	}).Info("Build lock acquired successfully")
-
-	jobID := uuid.New().String()
+	}).Info("Build lock acquired successfully with metadata")
 	now := time.Now()
 
 	// Always include job-id as a tag for traceability
