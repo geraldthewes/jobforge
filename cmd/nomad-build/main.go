@@ -162,11 +162,10 @@ FILES:
   build.yaml                Per-build configuration
 
 DOCUMENTATION:
+  docs/usage.md             Quick start and usage guide
   docs/JobSpec.md           Complete job configuration reference
-  README.md                 Project overview and setup guide
-  CLAUDE.md                 Development guidelines
 
-For more information, visit: https://github.com/geraldthewes/nomad-mcp-builder
+For more information, visit: https://github.com/geraldthewes/jobforge
 `
 )
 
