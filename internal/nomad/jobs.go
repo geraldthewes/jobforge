@@ -1170,9 +1170,14 @@ func (nc *Client) configureTestDockerConfig(job *types.Job, tempImageName string
 	}
 
 	// Add command if provided
+	// IMPORTANT: We must set "entrypoint" to override the image's default ENTRYPOINT.
+	// If we only set "command" (which maps to Docker's CMD), the test command would be
+	// ignored or passed as arguments to the ENTRYPOINT when the image has one defined.
+	// By setting entrypoint to ["sh", "-c"] and args to [testCmd], we ensure the test
+	// command actually runs instead of the image's default startup process.
 	if testCmd != "" {
-		config["command"] = "sh"
-		config["args"] = []string{"-c", testCmd}
+		config["entrypoint"] = []string{"sh", "-c"}
+		config["args"] = []string{testCmd}
 	}
 
 	// Add GPU runtime if required
