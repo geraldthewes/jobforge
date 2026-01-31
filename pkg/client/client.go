@@ -317,3 +317,75 @@ func (c *Client) handleErrorResponse(resp *http.Response) error {
 
 	return fmt.Errorf("HTTP %d: %s - %s", resp.StatusCode, errorResp.Error, errorResp.Details)
 }
+
+// ListLocks lists all build locks
+func (c *Client) ListLocks(staleOnly bool, owner string) (*types.ListLocksResponse, error) {
+	url := fmt.Sprintf("/json/locks?stale_only=%t", staleOnly)
+	if owner != "" {
+		url = fmt.Sprintf("%s&owner=%s", url, owner)
+	}
+
+	resp, err := c.doRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.ListLocksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}
+
+// ForceUnlock forcefully releases locks
+func (c *Client) ForceUnlock(req *types.ForceUnlockRequest) (*types.ForceUnlockResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest("POST", "/json/locks/force-unlock", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.ForceUnlockResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}
+
+// ListActiveJobs lists active jobs for a specific owner
+func (c *Client) ListActiveJobs(owner string) (*types.ListActiveJobsResponse, error) {
+	url := fmt.Sprintf("/json/active-jobs?owner=%s", owner)
+
+	resp, err := c.doRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.ListActiveJobsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}

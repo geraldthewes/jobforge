@@ -77,6 +77,12 @@ jobforge kill-job <job-id>
 jobforge cleanup <job-id>
 jobforge get-history [limit] [offset]
 
+# Lock management
+jobforge list-locks               # List all build locks
+jobforge list-locks --stale-only  # List only stale locks
+jobforge force-unlock <lock-key>  # Force release a lock
+jobforge list-active-jobs --owner <owner>  # List active jobs
+
 # Version management
 jobforge version-info           # Show current version and branch
 jobforge version-major <ver>    # Set major version (resets minor/patch to 0)
@@ -109,6 +115,10 @@ Direct HTTP/JSON endpoints for testing and non-MCP integrations:
 - `POST /json/getHistory` - Get job history
 - `GET /json/streamLogs?job_id=<id>` - WebSocket log streaming
 
+### Lock Management Endpoints
+- `GET /json/locks` - List all build locks
+- `POST /json/locks/force-unlock` - Force release locks
+- `GET /json/active-jobs?owner=<owner>` - List active jobs for an owner
 
 ### 3. Health & Monitoring
 
@@ -693,6 +703,7 @@ jobforge get-status $JOB_ID
 | `REGISTRY_USERNAME` | _(empty)_ | Registry username (optional for public registries) |
 | `REGISTRY_PASSWORD` | _(empty)_ | Registry password (optional for public registries) |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
+| `MAX_CONCURRENT_BUILDS_PER_OWNER` | `3` | Maximum concurrent builds per owner (0 = unlimited) |
 
 
 ### Consul Configuration

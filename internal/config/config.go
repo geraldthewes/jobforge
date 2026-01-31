@@ -66,15 +66,16 @@ type VaultConfig struct {
 }
 
 type BuildConfig struct {
-	DefaultResourceLimits ResourceLimits    `json:"default_resource_limits"`
-	BuildTimeout          time.Duration     `json:"build_timeout"`
-	TestTimeout           time.Duration     `json:"test_timeout"`
-	KillTimeout           time.Duration     `json:"kill_timeout"`
-	RegistryConfig        RegistryConfig    `json:"registry_config"`
-	BuildCachePath        string            `json:"build_cache_path"`
-	LogRetentionDays      int               `json:"log_retention_days"`
-	DockerLogMaxFiles     int               `json:"docker_log_max_files"`     // Max number of log files for Docker containers
-	DockerLogMaxFileSize  string            `json:"docker_log_max_file_size"` // Max size per log file (e.g., "10m")
+	DefaultResourceLimits      ResourceLimits `json:"default_resource_limits"`
+	BuildTimeout               time.Duration  `json:"build_timeout"`
+	TestTimeout                time.Duration  `json:"test_timeout"`
+	KillTimeout                time.Duration  `json:"kill_timeout"`
+	RegistryConfig             RegistryConfig `json:"registry_config"`
+	BuildCachePath             string         `json:"build_cache_path"`
+	LogRetentionDays           int            `json:"log_retention_days"`
+	DockerLogMaxFiles          int            `json:"docker_log_max_files"`          // Max number of log files for Docker containers
+	DockerLogMaxFileSize       string         `json:"docker_log_max_file_size"`      // Max size per log file (e.g., "10m")
+	MaxConcurrentBuildsPerOwner int           `json:"max_concurrent_builds_per_owner"` // Max concurrent builds per owner (0 = unlimited)
 }
 
 type ResourceLimits struct {
@@ -147,10 +148,11 @@ func Load() (*Config, error) {
 				Username:   getEnv("REGISTRY_USERNAME", ""),
 				Password:   getEnv("REGISTRY_PASSWORD", ""),
 			},
-			BuildCachePath:       getEnv("BUILD_CACHE_PATH", "/opt/nomad/data/buildah-cache"),
-			LogRetentionDays:     getEnvInt("LOG_RETENTION_DAYS", 7),
-			DockerLogMaxFiles:    getEnvInt("DOCKER_LOG_MAX_FILES", 5),
-			DockerLogMaxFileSize: getEnv("DOCKER_LOG_MAX_FILE_SIZE", "10m"),
+			BuildCachePath:              getEnv("BUILD_CACHE_PATH", "/opt/nomad/data/buildah-cache"),
+			LogRetentionDays:            getEnvInt("LOG_RETENTION_DAYS", 7),
+			DockerLogMaxFiles:           getEnvInt("DOCKER_LOG_MAX_FILES", 5),
+			DockerLogMaxFileSize:        getEnv("DOCKER_LOG_MAX_FILE_SIZE", "10m"),
+			MaxConcurrentBuildsPerOwner: getEnvInt("MAX_CONCURRENT_BUILDS_PER_OWNER", 3),
 		},
 		Monitoring: MonitoringConfig{
 			Enabled:     getEnvBool("MONITORING_ENABLED", true),

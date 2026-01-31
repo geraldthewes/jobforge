@@ -41,6 +41,11 @@ COMMANDS:
     cleanup <job-id>                  Clean up resources for a job
     get-history [limit] [offset]      Get job history (default: 10 recent jobs)
 
+  Lock Management:
+    list-locks [options]              List all build locks
+    force-unlock [options] <lock-key> Force release a build lock
+    list-active-jobs --owner <owner>  List active jobs for an owner
+
   Service Management:
     health                            Check service health status
 
@@ -154,6 +159,31 @@ EXAMPLES:
     #     ✅ nomad: healthy
     #     ✅ consul: healthy
 
+  Lock Management:
+    # List all build locks
+    jobforge list-locks
+
+    # List only stale locks (job completed but lock not released)
+    jobforge list-locks --stale-only
+
+    # List locks for a specific owner
+    jobforge list-locks --owner gerald
+
+    # Force unlock a specific lock
+    jobforge force-unlock image-registry.cluster-5000-myapp-main
+
+    # Force unlock without confirmation
+    jobforge force-unlock image-registry.cluster-5000-myapp-main --force
+
+    # Clear all stale locks
+    jobforge force-unlock --stale-only
+
+    # Nuclear option: clear ALL locks (dangerous!)
+    jobforge force-unlock --all --force
+
+    # List active jobs for an owner
+    jobforge list-active-jobs --owner gerald
+
 ENVIRONMENT VARIABLES:
   JOB_SERVICE_URL           Service URL (overrides default, can be overridden by -u flag)
 
@@ -235,6 +265,12 @@ func run(args []string) error {
 		return handleGetHistory(c, commandArgs)
 	case "health":
 		return handleHealth(c, commandArgs)
+	case "list-locks":
+		return handleListLocks(c, commandArgs)
+	case "force-unlock":
+		return handleForceUnlock(c, commandArgs)
+	case "list-active-jobs":
+		return handleListActiveJobs(c, commandArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
@@ -1166,4 +1202,255 @@ func displayFailedJobLogs(c *client.Client, jobID string, failedPhase string) er
 		}
 	}
 	return nil
+}
+
+// handleListLocks handles the list-locks command
+func handleListLocks(c *client.Client, args []string) error {
+	var staleOnly bool
+	var owner string
+
+	// Parse flags
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--stale-only" {
+			staleOnly = true
+			i++
+		} else if arg == "--owner" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("--owner flag requires a value")
+			}
+			owner = args[i+1]
+			i += 2
+		} else if strings.HasPrefix(arg, "--owner=") {
+			owner = strings.TrimPrefix(arg, "--owner=")
+			i++
+		} else if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown flag: %s", arg)
+		} else {
+			i++
+		}
+	}
+
+	response, err := c.ListLocks(staleOnly, owner)
+	if err != nil {
+		return fmt.Errorf("failed to list locks: %w", err)
+	}
+
+	// Print header
+	fmt.Printf("Build Locks (Total: %d, Stale: %d)\n", response.TotalCount, response.StaleCount)
+	fmt.Println(strings.Repeat("-", 100))
+
+	if len(response.Locks) == 0 {
+		fmt.Println("No locks found.")
+		return nil
+	}
+
+	// Print table header
+	fmt.Printf("%-45s %-12s %-10s %-15s %-10s %-5s\n",
+		"LOCK KEY", "JOB ID", "OWNER", "IMAGE", "AGE", "STALE")
+	fmt.Println(strings.Repeat("-", 100))
+
+	for _, lock := range response.Locks {
+		jobID := lock.JobID
+		if len(jobID) > 12 {
+			jobID = jobID[:12]
+		}
+
+		imageName := lock.ImageName
+		if len(imageName) > 15 {
+			imageName = imageName[:15]
+		}
+
+		lockKey := lock.LockKey
+		if len(lockKey) > 45 {
+			lockKey = lockKey[:45]
+		}
+
+		ownerStr := lock.Owner
+		if len(ownerStr) > 10 {
+			ownerStr = ownerStr[:10]
+		}
+
+		ageStr := formatDuration(lock.Age)
+
+		staleStr := "No"
+		if lock.IsStale {
+			staleStr = "Yes"
+			if lock.StaleReason != "" {
+				staleStr = fmt.Sprintf("Yes (%s)", lock.StaleReason)
+			}
+		}
+
+		fmt.Printf("%-45s %-12s %-10s %-15s %-10s %s\n",
+			lockKey, jobID, ownerStr, imageName, ageStr, staleStr)
+	}
+
+	return nil
+}
+
+// handleForceUnlock handles the force-unlock command
+func handleForceUnlock(c *client.Client, args []string) error {
+	var lockKey string
+	var staleOnly bool
+	var all bool
+	var force bool
+
+	// Parse flags
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--stale-only" {
+			staleOnly = true
+			i++
+		} else if arg == "--all" {
+			all = true
+			i++
+		} else if arg == "--force" || arg == "-f" {
+			force = true
+			i++
+		} else if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown flag: %s", arg)
+		} else if lockKey == "" {
+			lockKey = arg
+			i++
+		} else {
+			i++
+		}
+	}
+
+	// Validate
+	if lockKey == "" && !staleOnly && !all {
+		return fmt.Errorf("must specify lock-key, --stale-only, or --all")
+	}
+
+	if all && !force {
+		fmt.Println("WARNING: This will clear ALL locks, including active ones!")
+		fmt.Print("Are you sure? Type 'yes' to confirm: ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if confirm != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	if lockKey != "" && !force {
+		fmt.Printf("This will force release the lock: %s\n", lockKey)
+		fmt.Print("Are you sure? Type 'yes' to confirm: ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if confirm != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	req := &types.ForceUnlockRequest{
+		LockKey:   lockKey,
+		StaleOnly: staleOnly,
+		All:       all,
+		Force:     force || staleOnly, // --stale-only doesn't need --force
+	}
+
+	response, err := c.ForceUnlock(req)
+	if err != nil {
+		return fmt.Errorf("failed to force unlock: %w", err)
+	}
+
+	fmt.Printf("%s\n", response.Message)
+
+	if len(response.UnlockedKeys) > 0 {
+		fmt.Printf("\nUnlocked keys (%d):\n", len(response.UnlockedKeys))
+		for _, key := range response.UnlockedKeys {
+			fmt.Printf("  ✅ %s\n", key)
+		}
+	}
+
+	if len(response.FailedKeys) > 0 {
+		fmt.Printf("\nFailed to unlock (%d):\n", len(response.FailedKeys))
+		for _, key := range response.FailedKeys {
+			fmt.Printf("  ❌ %s\n", key)
+		}
+	}
+
+	return nil
+}
+
+// handleListActiveJobs handles the list-active-jobs command
+func handleListActiveJobs(c *client.Client, args []string) error {
+	var owner string
+
+	// Parse flags
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--owner" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("--owner flag requires a value")
+			}
+			owner = args[i+1]
+			i += 2
+		} else if strings.HasPrefix(arg, "--owner=") {
+			owner = strings.TrimPrefix(arg, "--owner=")
+			i++
+		} else if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown flag: %s", arg)
+		} else if owner == "" {
+			// Allow owner as positional argument
+			owner = arg
+			i++
+		} else {
+			i++
+		}
+	}
+
+	if owner == "" {
+		return fmt.Errorf("--owner is required")
+	}
+
+	response, err := c.ListActiveJobs(owner)
+	if err != nil {
+		return fmt.Errorf("failed to list active jobs: %w", err)
+	}
+
+	fmt.Printf("Active Jobs for Owner: %s\n", response.Owner)
+	fmt.Printf("Active Count: %d / %d (limit)\n", response.ActiveCount, response.Limit)
+	fmt.Println(strings.Repeat("-", 80))
+
+	if len(response.ActiveJobs) == 0 {
+		fmt.Println("No active jobs found.")
+		return nil
+	}
+
+	// Print table header
+	fmt.Printf("%-36s %-12s %-20s %-15s\n",
+		"JOB ID", "STATUS", "IMAGE", "STARTED")
+	fmt.Println(strings.Repeat("-", 80))
+
+	for _, job := range response.ActiveJobs {
+		imageName := job.ImageName
+		if len(imageName) > 20 {
+			imageName = imageName[:20]
+		}
+
+		started := job.StartedAt.Format("15:04:05")
+
+		fmt.Printf("%-36s %-12s %-20s %-15s\n",
+			job.JobID, job.Status, imageName, started)
+	}
+
+	return nil
+}
+
+// formatDuration formats a duration for display
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	} else if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	} else if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }

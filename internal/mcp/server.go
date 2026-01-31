@@ -116,6 +116,14 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/json/job/", s.handleJobResource)
 	mux.HandleFunc("/mcp/job/", s.handleJobResource)
 
+	// Lock management endpoints
+	mux.HandleFunc("/json/locks", s.handleListLocks)
+	mux.HandleFunc("/mcp/locks", s.handleListLocks)
+	mux.HandleFunc("/json/locks/force-unlock", s.handleForceUnlock)
+	mux.HandleFunc("/mcp/locks/force-unlock", s.handleForceUnlock)
+	mux.HandleFunc("/json/active-jobs", s.handleListActiveJobs)
+	mux.HandleFunc("/mcp/active-jobs", s.handleListActiveJobs)
+
 	// MCP Protocol endpoints
 	mux.HandleFunc("/mcp", s.handleMCPRequest)           // JSON-RPC over HTTP
 
@@ -209,7 +217,24 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, "Job configuration validation failed", http.StatusBadRequest, err.Error())
 		return
 	}
-	
+
+	// Check per-owner concurrent build limit
+	if err := s.checkOwnerBuildLimit(req.JobConfig.Owner); err != nil {
+		duration := time.Since(startTime)
+		s.logger.WithFields(map[string]interface{}{
+			"method":      r.Method,
+			"uri":         r.RequestURI,
+			"remote_addr": r.RemoteAddr,
+			"interface":   "REST",
+			"status":      http.StatusTooManyRequests,
+			"duration_ms": duration.Milliseconds(),
+			"error":       err.Error(),
+			"owner":       req.JobConfig.Owner,
+		}).Warn("REST API request failed: owner limit exceeded")
+		s.writeErrorResponse(w, "Too many concurrent builds", http.StatusTooManyRequests, err.Error())
+		return
+	}
+
 	// Create new job
 	job, err := s.nomadClient.CreateJob(&req.JobConfig)
 	if err != nil {
@@ -1386,6 +1411,11 @@ func (s *Server) mcpSubmitJob(id interface{}, args map[string]interface{}) MCPRe
 		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Job configuration validation failed", err.Error())
 	}
 
+	// Check per-owner concurrent build limit
+	if err := s.checkOwnerBuildLimit(jobConfig.Owner); err != nil {
+		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Too many concurrent builds", err.Error())
+	}
+
 	// Create job using existing logic
 	job, err := s.nomadClient.CreateJob(&jobConfig)
 	if err != nil {
@@ -2371,4 +2401,199 @@ func (s *Server) handleJobStatusChange(job *types.Job, oldStatus types.JobStatus
 	for _, event := range events {
 		s.sendWebhook(job, event)
 	}
+}
+
+// checkOwnerBuildLimit checks if the owner has reached their concurrent build limit
+func (s *Server) checkOwnerBuildLimit(owner string) error {
+	limit := s.config.Build.MaxConcurrentBuildsPerOwner
+	if limit <= 0 {
+		// No limit configured
+		return nil
+	}
+
+	activeJobs, err := s.storage.GetActiveJobsForOwner(owner)
+	if err != nil {
+		s.logger.WithError(err).WithField("owner", owner).Warn("Failed to get active jobs for owner")
+		// Don't block the build if we can't check the limit
+		return nil
+	}
+
+	if len(activeJobs) >= limit {
+		var activeJobIDs []string
+		for _, job := range activeJobs {
+			activeJobIDs = append(activeJobIDs, job.JobID)
+		}
+		return fmt.Errorf("owner '%s' has %d active builds (limit: %d). Complete or kill existing jobs first. Active jobs: %s",
+			owner, len(activeJobs), limit, strings.Join(activeJobIDs, ", "))
+	}
+
+	return nil
+}
+
+// handleListLocks handles GET /json/locks - list all build locks
+func (s *Server) handleListLocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req types.ListLocksRequest
+	if r.Method == http.MethodPost {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeErrorResponse(w, "Invalid request body", http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
+		// Parse query parameters for GET
+		req.StaleOnly = r.URL.Query().Get("stale_only") == "true"
+		req.Owner = r.URL.Query().Get("owner")
+	}
+
+	locks, err := s.storage.ListLocks()
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to list locks", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Filter locks if requested
+	var filteredLocks []types.LockInfo
+	staleCount := 0
+	for _, lock := range locks {
+		if lock.IsStale {
+			staleCount++
+		}
+
+		// Apply filters
+		if req.StaleOnly && !lock.IsStale {
+			continue
+		}
+		if req.Owner != "" && lock.Owner != req.Owner {
+			continue
+		}
+		filteredLocks = append(filteredLocks, lock)
+	}
+
+	response := types.ListLocksResponse{
+		Locks:      filteredLocks,
+		TotalCount: len(locks),
+		StaleCount: staleCount,
+	}
+
+	s.writeJSONResponse(w, response)
+}
+
+// handleForceUnlock handles POST /json/locks/force-unlock - forcefully release locks
+func (s *Server) handleForceUnlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req types.ForceUnlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, "Invalid request body", http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Validate request
+	if req.All && !req.Force {
+		s.writeErrorResponse(w, "The --all flag requires --force for safety", http.StatusBadRequest, "")
+		return
+	}
+
+	if req.LockKey == "" && !req.StaleOnly && !req.All {
+		s.writeErrorResponse(w, "Must specify lock_key, stale_only, or all", http.StatusBadRequest, "")
+		return
+	}
+
+	var unlockedKeys []string
+	var failedKeys []string
+
+	if req.LockKey != "" {
+		// Unlock a specific lock
+		if err := s.storage.ForceReleaseLock(req.LockKey); err != nil {
+			failedKeys = append(failedKeys, req.LockKey)
+			s.logger.WithError(err).WithField("lock_key", req.LockKey).Warn("Failed to force unlock")
+		} else {
+			unlockedKeys = append(unlockedKeys, req.LockKey)
+		}
+	} else if req.StaleOnly {
+		// Unlock all stale locks
+		cleaned, err := s.storage.CleanupStaleLocks()
+		if err != nil {
+			s.writeErrorResponse(w, "Failed to cleanup stale locks", http.StatusInternalServerError, err.Error())
+			return
+		}
+		unlockedKeys = cleaned
+	} else if req.All {
+		// Unlock ALL locks
+		locks, err := s.storage.ListLocks()
+		if err != nil {
+			s.writeErrorResponse(w, "Failed to list locks", http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		for _, lock := range locks {
+			if err := s.storage.ForceReleaseLock(lock.LockKey); err != nil {
+				failedKeys = append(failedKeys, lock.LockKey)
+				s.logger.WithError(err).WithField("lock_key", lock.LockKey).Warn("Failed to force unlock")
+			} else {
+				unlockedKeys = append(unlockedKeys, lock.LockKey)
+			}
+		}
+	}
+
+	response := types.ForceUnlockResponse{
+		Success:       len(failedKeys) == 0,
+		UnlockedKeys:  unlockedKeys,
+		FailedKeys:    failedKeys,
+		UnlockedCount: len(unlockedKeys),
+		Message:       fmt.Sprintf("Unlocked %d lock(s)", len(unlockedKeys)),
+	}
+
+	if len(failedKeys) > 0 {
+		response.Message = fmt.Sprintf("Unlocked %d lock(s), failed to unlock %d lock(s)", len(unlockedKeys), len(failedKeys))
+	}
+
+	s.writeJSONResponse(w, response)
+}
+
+// handleListActiveJobs handles GET/POST /json/active-jobs - list active jobs for an owner
+func (s *Server) handleListActiveJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var owner string
+	if r.Method == http.MethodPost {
+		var req types.ListActiveJobsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeErrorResponse(w, "Invalid request body", http.StatusBadRequest, err.Error())
+			return
+		}
+		owner = req.Owner
+	} else {
+		owner = r.URL.Query().Get("owner")
+	}
+
+	if owner == "" {
+		s.writeErrorResponse(w, "owner parameter is required", http.StatusBadRequest, "")
+		return
+	}
+
+	activeJobs, err := s.storage.GetActiveJobsForOwner(owner)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to get active jobs", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := types.ListActiveJobsResponse{
+		Owner:       owner,
+		ActiveJobs:  activeJobs,
+		ActiveCount: len(activeJobs),
+		Limit:       s.config.Build.MaxConcurrentBuildsPerOwner,
+	}
+
+	s.writeJSONResponse(w, response)
 }

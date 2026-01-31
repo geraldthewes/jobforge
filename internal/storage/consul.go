@@ -362,9 +362,243 @@ func (cs *ConsulStorage) GenerateImageLockKey(registryURL, imageName, branch str
 	sanitizedRegistry := strings.ToLower(strings.ReplaceAll(registryURL, "/", "-"))
 	sanitizedImage := strings.ToLower(strings.ReplaceAll(imageName, "/", "-"))
 	sanitizedBranch := strings.ToLower(strings.ReplaceAll(branch, "/", "-"))
-	
+
 	// Create a consistent lock key that includes registry, image, and branch
 	// This allows different branches to build concurrently but prevents
 	// concurrent builds of the same image on the same branch
 	return fmt.Sprintf("image-%s-%s-%s", sanitizedRegistry, sanitizedImage, sanitizedBranch)
+}
+
+// AcquireLockWithMetadata acquires a distributed lock with enhanced metadata
+// Returns a session ID that must be used to release the lock
+func (cs *ConsulStorage) AcquireLockWithMetadata(lockKey string, timeout time.Duration, metadata *types.LockMetadata) (string, error) {
+	cs.logger.WithField("lock_key", lockKey).Debug("Attempting to acquire lock with metadata")
+
+	// Create a session for the lock
+	session := &consulapi.SessionEntry{
+		TTL:      timeout.String(),
+		Behavior: consulapi.SessionBehaviorRelease,
+		Name:     fmt.Sprintf("build-lock-%s", lockKey),
+	}
+
+	sessionID, _, err := cs.client.Session().Create(session, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create session for lock: %w", err)
+	}
+
+	cs.logger.WithFields(logrus.Fields{
+		"lock_key":   lockKey,
+		"session_id": sessionID,
+	}).Debug("Session created for lock")
+
+	// Prepare lock value with metadata
+	metadata.SessionID = sessionID
+	metadata.AcquiredAt = time.Now()
+
+	lockValue, err := json.Marshal(metadata)
+	if err != nil {
+		cs.client.Session().Destroy(sessionID, nil)
+		return "", fmt.Errorf("failed to marshal lock metadata: %w", err)
+	}
+
+	// Try to acquire the lock
+	fullKey := fmt.Sprintf("%s/locks/%s", cs.keyPrefix, lockKey)
+	pair := &consulapi.KVPair{
+		Key:     fullKey,
+		Value:   lockValue,
+		Session: sessionID,
+	}
+
+	// Use the Acquire method which is atomic
+	acquired, _, err := cs.client.KV().Acquire(pair, nil)
+	if err != nil {
+		// Clean up session if acquire failed
+		cs.client.Session().Destroy(sessionID, nil)
+		return "", fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	if !acquired {
+		// Lock is held by someone else, clean up session
+		cs.client.Session().Destroy(sessionID, nil)
+		return "", fmt.Errorf("lock is already held by another process")
+	}
+
+	cs.logger.WithFields(logrus.Fields{
+		"lock_key":   lockKey,
+		"session_id": sessionID,
+		"owner":      metadata.Owner,
+		"job_id":     metadata.JobID,
+	}).Info("Lock acquired successfully with metadata")
+
+	return sessionID, nil
+}
+
+// ListLocks returns all current build locks with their metadata
+func (cs *ConsulStorage) ListLocks() ([]types.LockInfo, error) {
+	prefix := fmt.Sprintf("%s/locks/", cs.keyPrefix)
+
+	pairs, _, err := cs.client.KV().List(prefix, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list locks from Consul: %w", err)
+	}
+
+	var locks []types.LockInfo
+	now := time.Now()
+
+	for _, pair := range pairs {
+		lockKey := pair.Key[len(prefix):]
+
+		lockInfo := types.LockInfo{
+			LockKey: lockKey,
+		}
+
+		// Try to parse enhanced metadata
+		var metadata types.LockMetadata
+		if err := json.Unmarshal(pair.Value, &metadata); err == nil {
+			lockInfo.SessionID = metadata.SessionID
+			lockInfo.JobID = metadata.JobID
+			lockInfo.Owner = metadata.Owner
+			lockInfo.ImageName = metadata.ImageName
+			lockInfo.GitRef = metadata.GitRef
+			lockInfo.RegistryURL = metadata.RegistryURL
+			lockInfo.AcquiredAt = metadata.AcquiredAt
+			lockInfo.Age = now.Sub(metadata.AcquiredAt)
+		} else {
+			// Legacy lock format - value is just session ID
+			lockInfo.SessionID = string(pair.Value)
+			// Age unknown for legacy locks
+		}
+
+		// Check if the lock is stale by verifying the job status
+		if lockInfo.JobID != "" {
+			isStale, reason := cs.isLockStale(lockInfo.JobID)
+			lockInfo.IsStale = isStale
+			lockInfo.StaleReason = reason
+		} else if pair.Session == "" {
+			// Lock has no session attached (orphaned)
+			lockInfo.IsStale = true
+			lockInfo.StaleReason = "no session attached"
+		}
+
+		locks = append(locks, lockInfo)
+	}
+
+	return locks, nil
+}
+
+// isLockStale checks if a lock is stale by verifying the job status
+func (cs *ConsulStorage) isLockStale(jobID string) (bool, string) {
+	job, err := cs.GetJob(jobID)
+	if err != nil {
+		// Job not found in storage - likely completed and cleaned up
+		return true, "job not found in storage"
+	}
+
+	// Check if job is in a terminal state
+	switch job.Status {
+	case types.StatusSucceeded:
+		return true, "job completed successfully"
+	case types.StatusFailed:
+		return true, "job failed"
+	}
+
+	return false, ""
+}
+
+// GetActiveJobsForOwner returns the count and list of active jobs for a specific owner
+func (cs *ConsulStorage) GetActiveJobsForOwner(owner string) ([]types.ActiveJobInfo, error) {
+	jobIDs, err := cs.ListJobs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list jobs: %w", err)
+	}
+
+	var activeJobs []types.ActiveJobInfo
+
+	for _, jobID := range jobIDs {
+		job, err := cs.GetJob(jobID)
+		if err != nil {
+			cs.logger.WithError(err).WithField("job_id", jobID).Warn("Failed to get job during active jobs query")
+			continue
+		}
+
+		// Check if job belongs to the owner and is active
+		if job.Config.Owner != owner {
+			continue
+		}
+
+		// Check if job is in an active (non-terminal) state
+		switch job.Status {
+		case types.StatusPending, types.StatusBuilding, types.StatusTesting, types.StatusTestingExternal, types.StatusPublishing:
+			activeJobInfo := types.ActiveJobInfo{
+				JobID:     job.ID,
+				Status:    job.Status,
+				ImageName: job.Config.ImageName,
+				GitRef:    job.Config.GitRef,
+				LockKey:   job.LockKey,
+			}
+			if job.StartedAt != nil {
+				activeJobInfo.StartedAt = *job.StartedAt
+			} else {
+				activeJobInfo.StartedAt = job.CreatedAt
+			}
+			activeJobs = append(activeJobs, activeJobInfo)
+		}
+	}
+
+	return activeJobs, nil
+}
+
+// ForceReleaseLock forcefully releases a lock by destroying its session and deleting the key
+func (cs *ConsulStorage) ForceReleaseLock(lockKey string) error {
+	fullKey := fmt.Sprintf("%s/locks/%s", cs.keyPrefix, lockKey)
+
+	// Get the lock to find its session
+	pair, _, err := cs.client.KV().Get(fullKey, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get lock: %w", err)
+	}
+
+	if pair == nil {
+		return fmt.Errorf("lock not found: %s", lockKey)
+	}
+
+	// Try to destroy the session if present
+	if pair.Session != "" {
+		_, err = cs.client.Session().Destroy(pair.Session, nil)
+		if err != nil {
+			cs.logger.WithError(err).WithField("session_id", pair.Session).Warn("Failed to destroy session during force unlock")
+		}
+	}
+
+	// Delete the lock key
+	_, err = cs.client.KV().Delete(fullKey, nil)
+	if err != nil {
+		return fmt.Errorf("failed to delete lock key: %w", err)
+	}
+
+	cs.logger.WithField("lock_key", lockKey).Info("Lock forcefully released")
+	return nil
+}
+
+// CleanupStaleLocks removes all locks where the associated job is completed or missing
+func (cs *ConsulStorage) CleanupStaleLocks() ([]string, error) {
+	locks, err := cs.ListLocks()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list locks: %w", err)
+	}
+
+	var cleanedKeys []string
+
+	for _, lock := range locks {
+		if lock.IsStale {
+			if err := cs.ForceReleaseLock(lock.LockKey); err != nil {
+				cs.logger.WithError(err).WithField("lock_key", lock.LockKey).Warn("Failed to cleanup stale lock")
+				continue
+			}
+			cleanedKeys = append(cleanedKeys, lock.LockKey)
+		}
+	}
+
+	cs.logger.WithField("cleaned_count", len(cleanedKeys)).Info("Cleaned up stale locks")
+	return cleanedKeys, nil
 }
