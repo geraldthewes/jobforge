@@ -85,6 +85,9 @@ SUBMIT-JOB OPTIONS:
                             configured repo_url, warns if there are local commits
                             that haven't been pushed to the remote
 
+  --fail-on-git-check       Fail immediately if unpushed commits are detected
+                            (non-interactive mode for CI/CD pipelines)
+
 GET-LOGS OPTIONS:
   --phase <phase>           Get logs for specific phase only (build, test, or publish)
                             If not specified, returns logs for all phases
@@ -314,6 +317,7 @@ func handleSubmitJob(c *client.Client, args []string) error {
 	var watch bool
 	var enableHistory bool
 	var noGitCheck bool
+	var failOnGitCheck bool
 
 	i := 0
 	for i < len(args) {
@@ -326,6 +330,9 @@ func handleSubmitJob(c *client.Client, args []string) error {
 			i++
 		} else if arg == "--no-git-check" {
 			noGitCheck = true
+			i++
+		} else if arg == "--fail-on-git-check" {
+			failOnGitCheck = true
 			i++
 		} else if arg == "--image-tags" {
 			if i+1 >= len(args) {
@@ -425,7 +432,7 @@ func handleSubmitJob(c *client.Client, args []string) error {
 
 	// Check for unpushed commits unless --no-git-check is specified
 	if !noGitCheck && jobConfig.RepoURL != "" {
-		if err := checkAndWarnUnpushedCommits(jobConfig); err != nil {
+		if err := checkAndWarnUnpushedCommits(jobConfig, failOnGitCheck); err != nil {
 			return err
 		}
 	}
@@ -522,8 +529,9 @@ func parseConfigData(data string) (*types.JobConfig, error) {
 }
 
 // checkAndWarnUnpushedCommits checks for unpushed commits and prompts the user for confirmation.
-// Returns an error if the user aborts, nil if they proceed or no warning is needed.
-func checkAndWarnUnpushedCommits(jobConfig *types.JobConfig) error {
+// If failOnGitCheck is true, returns an error immediately without prompting (for CI/CD pipelines).
+// Returns an error if the user aborts or failOnGitCheck is set, nil if they proceed or no warning is needed.
+func checkAndWarnUnpushedCommits(jobConfig *types.JobConfig, failOnGitCheck bool) error {
 	// Get current working directory
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -569,6 +577,12 @@ func checkAndWarnUnpushedCommits(jobConfig *types.JobConfig) error {
 	fmt.Println()
 	fmt.Println("The remote build will use code from the remote repository,")
 	fmt.Println("which does not include your local changes.")
+
+	// If --fail-on-git-check is set, fail immediately without prompting
+	if failOnGitCheck {
+		return fmt.Errorf("unpushed commits detected: %d commits ahead of remote (CI/CD mode: --fail-on-git-check)", status.UnpushedCount)
+	}
+
 	fmt.Println()
 	fmt.Print("Proceed anyway? Type 'yes' to continue: ")
 
