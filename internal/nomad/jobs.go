@@ -30,7 +30,7 @@ func (nc *Client) createBuildJobSpec(job *types.Job) (*nomadapi.Job, error) {
 	
 	// Determine if we should skip tests (no tests configured)
 	// Python tests also require the temp image flow
-	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonCommand == "")
+	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonFile == "")
 	
 	var buildImageNames []string
 	var pushCommands []string

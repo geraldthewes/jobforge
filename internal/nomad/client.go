@@ -194,10 +194,10 @@ func (nc *Client) CreateJob(jobConfig *types.JobConfig) (*types.Job, error) {
 // UpdateJobStatus updates the job status by querying Nomad
 func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 	// Check if tests are configured (including external python tests)
-	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonCommand == "")
+	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonFile == "")
 
 	// Check if this is an external (python) test job
-	isExternalTest := job.Config.Test != nil && job.Config.Test.PythonCommand != ""
+	isExternalTest := job.Config.Test != nil && job.Config.Test.PythonFile != ""
 	
 	// Check build job status
 	if job.BuildJobID != "" {
@@ -1242,7 +1242,7 @@ func (nc *Client) getBuildJobNodeID(buildJobID string) (string, error) {
 
 func (nc *Client) startTestPhase(job *types.Job) error {
 	// Check if this is an external (python) test
-	if job.Config.Test != nil && job.Config.Test.PythonCommand != "" {
+	if job.Config.Test != nil && job.Config.Test.PythonFile != "" {
 		return nc.startExternalTestPhase(job)
 	}
 

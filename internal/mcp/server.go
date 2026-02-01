@@ -2192,7 +2192,7 @@ func (s *Server) handleGetTestEndpoint(w http.ResponseWriter, r *http.Request, j
 	}
 
 	// Check if this is an external test job
-	if job.Config.Test == nil || job.Config.Test.PythonCommand == "" {
+	if job.Config.Test == nil || job.Config.Test.PythonFile == "" {
 		s.writeErrorResponse(w, "Job is not configured for external python tests", http.StatusBadRequest, "")
 		return
 	}

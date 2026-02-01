@@ -391,9 +391,9 @@ func handleSubmitJob(c *client.Client, args []string) error {
 	}
 
 	// Automatically enable --watch for python tests and inform the user
-	if jobConfig.Test != nil && jobConfig.Test.PythonCommand != "" && !watch {
+	if jobConfig.Test != nil && jobConfig.Test.PythonFile != "" && !watch {
 		watch = true
-		fmt.Println("Note: Python test command detected - watch mode enabled automatically")
+		fmt.Println("Note: Python test file detected - watch mode enabled automatically")
 	}
 
 	// Set image tags from --image-tags flag if provided
@@ -823,7 +823,7 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 
 			// Handle external python tests
 			if update.Status == types.StatusTestingExternal && !pythonTestsTriggered {
-				if jobConfig != nil && jobConfig.Test != nil && jobConfig.Test.PythonCommand != "" {
+				if jobConfig != nil && jobConfig.Test != nil && jobConfig.Test.PythonFile != "" {
 					pythonTestsTriggered = true
 					fmt.Printf("\n[%s] 🐍 Starting external Python tests...\n", time.Now().Format("15:04:05"))
 
@@ -1006,12 +1006,17 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 	fmt.Println("Running Python tests...")
 	startTime := time.Now()
 
-	cmdParts := strings.Fields(jobConfig.Test.PythonCommand)
-	if len(cmdParts) == 0 {
-		return reportTestFailure(httpClient, jobID, "Empty python_command", -1)
+	if jobConfig.Test.PythonFile == "" {
+		return reportTestFailure(httpClient, jobID, "Empty python_file", -1)
 	}
 
-	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	// Build python-executor command
+	cmdArgs := []string{"run", "--file", jobConfig.Test.PythonFile}
+	if jobConfig.Test.PythonRequirements != "" {
+		cmdArgs = append(cmdArgs, "--requirements", jobConfig.Test.PythonRequirements)
+	}
+
+	cmd := exec.Command("python-executor", cmdArgs...)
 
 	// Set working directory
 	if jobConfig.Test.PythonCwd != "" {

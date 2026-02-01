@@ -42,11 +42,12 @@ type TestConfig struct {
 	Constraints    []Constraint           `json:"constraints,omitempty" yaml:"constraints,omitempty"`       // Custom node constraints for test job placement
 
 	// External Python test configuration (runs via python-executor on CLI machine)
-	PythonCwd      string `json:"python_cwd,omitempty" yaml:"python_cwd,omitempty"`           // Working directory for python tests (relative to repo root)
-	PythonCommand  string `json:"python_command,omitempty" yaml:"python_command,omitempty"`   // Command to run (e.g., "python-executor run --file test.py")
-	HealthEndpoint string `json:"health_endpoint,omitempty" yaml:"health_endpoint,omitempty"` // Health check endpoint to poll before tests (default: /health)
-	HealthTimeout  int    `json:"health_timeout,omitempty" yaml:"health_timeout,omitempty"`   // Seconds to wait for health check (default: 60)
-	ContainerPort  int    `json:"container_port,omitempty" yaml:"container_port,omitempty"`   // Port the container exposes (default: 8080)
+	PythonCwd          string `json:"python_cwd,omitempty" yaml:"python_cwd,omitempty"`                     // Working directory for python tests (relative to repo root)
+	PythonFile         string `json:"python_file,omitempty" yaml:"python_file,omitempty"`                   // Python test file to run (e.g., "test_api.py")
+	PythonRequirements string `json:"python_requirements,omitempty" yaml:"python_requirements,omitempty"`   // Requirements file for python tests (e.g., "requirements.txt")
+	HealthEndpoint     string `json:"health_endpoint,omitempty" yaml:"health_endpoint,omitempty"`           // Health check endpoint to poll before tests (default: /health)
+	HealthTimeout      int    `json:"health_timeout,omitempty" yaml:"health_timeout,omitempty"`             // Seconds to wait for health check (default: 60)
+	ContainerPort      int    `json:"container_port,omitempty" yaml:"container_port,omitempty"`             // Port the container exposes (default: 8080)
 }
 
 // JobConfig represents the configuration for a build job
