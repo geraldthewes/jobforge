@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +18,8 @@ import (
 	"nomad-mcp-builder/pkg/consul"
 	"nomad-mcp-builder/pkg/history"
 	"nomad-mcp-builder/pkg/types"
+
+	pyexec "github.com/geraldthewes/python-executor/pkg/client"
 )
 
 const (
@@ -1002,7 +1003,7 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 		return reportTestFailure(httpClient, jobID, fmt.Sprintf("Health check timeout after %ds", timeout), -1)
 	}
 
-	// 3. Run python-executor
+	// 3. Run python-executor via Go client library
 	fmt.Println("Running Python tests...")
 	startTime := time.Now()
 
@@ -1010,59 +1011,105 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 		return reportTestFailure(httpClient, jobID, "Empty python_file", -1)
 	}
 
-	// Build python-executor command
-	cmdArgs := []string{"run", "--file", jobConfig.Test.PythonFile}
-	if jobConfig.Test.PythonRequirements != "" {
-		cmdArgs = append(cmdArgs, "--requirements", jobConfig.Test.PythonRequirements)
-	}
-
-	cmd := exec.Command("python-executor", cmdArgs...)
-
-	// Set working directory
+	// Determine working directory
+	workDir := "."
 	if jobConfig.Test.PythonCwd != "" {
-		cmd.Dir = jobConfig.Test.PythonCwd
+		workDir = jobConfig.Test.PythonCwd
 	}
 
-	// Set environment variables
-	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort))
+	// Read Python test file
+	pythonFilePath := filepath.Join(workDir, jobConfig.Test.PythonFile)
+	pythonContent, err := os.ReadFile(pythonFilePath)
+	if err != nil {
+		return reportTestFailure(httpClient, jobID, fmt.Sprintf("Failed to read python file %s: %v", pythonFilePath, err), -1)
+	}
 
-	// Capture output while also printing to console
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	// Build file map for tar
+	files := map[string]string{
+		jobConfig.Test.PythonFile: string(pythonContent),
+	}
 
-	err = cmd.Run()
+	// Read requirements.txt if provided
+	var requirementsContent string
+	if jobConfig.Test.PythonRequirements != "" {
+		reqPath := filepath.Join(workDir, jobConfig.Test.PythonRequirements)
+		reqBytes, err := os.ReadFile(reqPath)
+		if err != nil {
+			return reportTestFailure(httpClient, jobID, fmt.Sprintf("Failed to read requirements file %s: %v", reqPath, err), -1)
+		}
+		requirementsContent = string(reqBytes)
+		files[jobConfig.Test.PythonRequirements] = requirementsContent
+	}
+
+	// Create tar from files
+	tarData, err := pyexec.TarFromMap(files)
+	if err != nil {
+		return reportTestFailure(httpClient, jobID, fmt.Sprintf("Failed to create tar: %v", err), -1)
+	}
+
+	// Get pyexec server URL from environment or use default
+	pyexecServer := os.Getenv("PYEXEC_SERVER")
+	if pyexecServer == "" {
+		pyexecServer = "http://pyexec.cluster:9999"
+	}
+
+	// Create python-executor client
+	pyClient := pyexec.New(pyexecServer)
+
+	// Build metadata with environment variables for the container
+	metadata := &pyexec.Metadata{
+		Entrypoint:      jobConfig.Test.PythonFile,
+		RequirementsTxt: requirementsContent,
+		EnvVars: []string{
+			fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost),
+			fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort),
+		},
+	}
+
+	// Execute the Python tests
+	ctx := context.Background()
+	result, err := pyClient.ExecuteSync(ctx, tarData, metadata)
 	duration := time.Since(startTime)
+
+	// Print output to console
+	if result != nil {
+		if result.Stdout != "" {
+			fmt.Print(result.Stdout)
+		}
+		if result.Stderr != "" {
+			fmt.Fprint(os.Stderr, result.Stderr)
+		}
+	}
 
 	// 4. Report results to server
 	exitCode := 0
 	success := true
+	var stdout, stderr string
+
 	if err != nil {
 		success = false
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			// Command failed to start (not found, permission denied, etc.)
-			exitCode = -1
-			// Include the actual error in stderr for debugging
-			errorMsg := fmt.Sprintf("Command execution error: %v", err)
-			fmt.Fprintf(os.Stderr, "%s\n", errorMsg)
-			stderr.WriteString(errorMsg + "\n")
+		exitCode = -1
+		stderr = fmt.Sprintf("Python executor error: %v", err)
+		fmt.Fprintf(os.Stderr, "%s\n", stderr)
+	} else if result != nil {
+		exitCode = result.ExitCode
+		stdout = result.Stdout
+		stderr = result.Stderr
+		if result.ExitCode != 0 {
+			success = false
 		}
 	}
 
-	result := &types.ReportTestResultRequest{
+	testResult := &types.ReportTestResultRequest{
 		JobID:    jobID,
 		Success:  success,
 		ExitCode: exitCode,
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
+		Stdout:   stdout,
+		Stderr:   stderr,
 		Duration: duration.Milliseconds(),
 	}
 
-	_, err = httpClient.ReportTestResult(result)
+	_, err = httpClient.ReportTestResult(testResult)
 	if err != nil {
 		return fmt.Errorf("failed to report test result: %w", err)
 	}
@@ -1084,7 +1131,7 @@ func reportTestFailure(c *client.Client, jobID, message string, exitCode int) er
 		Stderr:   message,
 	}
 	c.ReportTestResult(result)
-	return fmt.Errorf(message)
+	return fmt.Errorf("%s", message)
 }
 
 // writeCompleteHistory fetches job details and logs from server and writes complete history
