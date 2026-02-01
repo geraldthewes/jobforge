@@ -93,6 +93,41 @@ jobforge force-unlock --all --force
 jobforge list-active-jobs --owner gerald
 ```
 
+### Storage Management
+
+The buildah storage cache at `/opt/nomad/data/buildah-cache` can accumulate over time and consume disk space. Use the prune-storage command to clean it up.
+
+```bash
+# Preview what would be cleaned (recommended first step)
+jobforge prune-storage --dry-run
+
+# Conservative prune (default) - removes dangling images and caches >24h old
+jobforge prune-storage
+
+# Watch prune job progress
+jobforge prune-storage --watch
+
+# Prune only a specific project's cache
+jobforge prune-storage --project myapp
+
+# Aggressive prune - removes ALL cached images and layers
+# Warning: This will slow down subsequent builds significantly
+jobforge prune-storage --all --force
+
+# Prune on all Nomad nodes (uses sysbatch job)
+jobforge prune-storage --all-nodes
+
+# Aggressive prune across all nodes
+jobforge prune-storage --all --all-nodes --force
+```
+
+**Important Notes:**
+- Use `--dry-run` first to see what would be cleaned
+- Conservative prune keeps recent layers for faster rebuilds
+- Aggressive prune (`--all`) clears everything - use sparingly
+- The `--force` flag is required for aggressive prune when active builds are detected
+- Use `--all-nodes` when storage issues are cluster-wide
+
 ## Configuration Reference
 
 For complete job configuration options (YAML schema, test configuration, resource limits, webhooks, etc.), see [JobSpec.md](JobSpec.md).

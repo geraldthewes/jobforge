@@ -389,3 +389,52 @@ func (c *Client) ListActiveJobs(owner string) (*types.ListActiveJobsResponse, er
 
 	return &response, nil
 }
+
+// PruneStorage submits a prune storage job to clean up buildah cache
+func (c *Client) PruneStorage(req *types.PruneStorageRequest) (*types.PruneStorageResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest("POST", "/json/prune-storage", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.PruneStorageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}
+
+// GetPruneJobStatus gets the status and logs for a prune job
+func (c *Client) GetPruneJobStatus(pruneJobID string) (string, []string, error) {
+	// Use the Nomad job status endpoint via direct REST call
+	resp, err := c.doRequest("GET", fmt.Sprintf("/json/job/%s/status", pruneJobID), nil)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, c.handleErrorResponse(resp)
+	}
+
+	var statusResp struct {
+		Status string   `json:"status"`
+		Logs   []string `json:"logs,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
+		return "", nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return statusResp.Status, statusResp.Logs, nil
+}

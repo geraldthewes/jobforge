@@ -1905,6 +1905,80 @@ func (nc *Client) GetJobAllocations(job *types.Job) (*types.JobAllocations, erro
 	return allocations, nil
 }
 
+// RunPruneStorage submits a prune storage job and returns the job ID
+func (nc *Client) RunPruneStorage(req *types.PruneStorageRequest) (string, error) {
+	// Generate a unique job ID for the prune operation
+	pruneJobID := fmt.Sprintf("prune-storage-%s", uuid.New().String()[:8])
+
+	// Create the job specification
+	jobSpec := nc.createPruneStorageJobSpec(req, pruneJobID)
+
+	// Log the job specification for debugging
+	nc.logJobSpec(jobSpec, "prune-storage")
+
+	// Submit the job to Nomad
+	registerOpts := &nomadapi.RegisterOptions{
+		PolicyOverride: false,
+		PreserveCounts: false,
+	}
+	writeOpts := &nomadapi.WriteOptions{
+		Region:    nc.config.Nomad.Region,
+		Namespace: nc.config.Nomad.Namespace,
+	}
+
+	evalID, _, err := nc.client.Jobs().RegisterOpts(jobSpec, registerOpts, writeOpts)
+	if err != nil {
+		return "", fmt.Errorf("failed to submit prune storage job: %w", err)
+	}
+
+	nc.logger.WithFields(logrus.Fields{
+		"prune_job_id": pruneJobID,
+		"eval_id":      evalID,
+		"dry_run":      req.DryRun,
+		"all":          req.All,
+		"all_nodes":    req.AllNodes,
+		"project":      req.Project,
+	}).Info("Prune storage job submitted to Nomad")
+
+	return pruneJobID, nil
+}
+
+// GetPruneJobStatus returns the status and logs for a prune job
+func (nc *Client) GetPruneJobStatus(pruneJobID string) (string, []string, error) {
+	status, err := nc.getJobStatus(pruneJobID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get prune job status: %w", err)
+	}
+
+	logs, err := nc.getJobLogs(pruneJobID)
+	if err != nil {
+		nc.logger.WithError(err).Warn("Failed to get prune job logs")
+		logs = []string{}
+	}
+
+	return status, logs, nil
+}
+
+// CheckActiveBuildJobs checks if there are any active build jobs running
+func (nc *Client) CheckActiveBuildJobs() ([]string, error) {
+	jobs, _, err := nc.client.Jobs().List(&nomadapi.QueryOptions{
+		Namespace: nc.config.Nomad.Namespace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list jobs: %w", err)
+	}
+
+	var activeBuilds []string
+	for _, job := range jobs {
+		// Check for active build jobs
+		if strings.HasPrefix(job.ID, "build-") && job.Status == "running" {
+			activeBuilds = append(activeBuilds, job.ID)
+		}
+	}
+
+	return activeBuilds, nil
+}
+
 // getPhaseAllocations retrieves allocation details for a specific Nomad job
 func (nc *Client) getPhaseAllocations(nomadJobID, phase string) (*types.PhaseAllocations, error) {
 	allocs, _, err := nc.client.Jobs().Allocations(nomadJobID, false, nil)

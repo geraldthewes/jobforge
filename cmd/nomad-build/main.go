@@ -46,6 +46,9 @@ COMMANDS:
     force-unlock [options] <lock-key> Force release a build lock
     list-active-jobs --owner <owner>  List active jobs for an owner
 
+  Storage Management:
+    prune-storage [options]           Prune buildah storage cache to free disk space
+
   Service Management:
     health                            Check service health status
 
@@ -77,6 +80,14 @@ SUBMIT-JOB OPTIONS:
 GET-LOGS OPTIONS:
   --phase <phase>           Get logs for specific phase only (build, test, or publish)
                             If not specified, returns logs for all phases
+
+PRUNE-STORAGE OPTIONS:
+  --dry-run                 Preview what would be cleaned without deleting
+  --project <name>          Only prune cache for a specific project/image
+  --all                     Aggressive prune: remove all images and caches
+  --all-nodes               Prune on all Nomad nodes (uses sysbatch)
+  --force                   Skip safety checks (required with --all if builds active)
+  -w, --watch               Watch prune job progress
 
 YAML CONFIGURATION:
   Global config (deploy/global.yaml) - Shared settings:
@@ -271,6 +282,8 @@ func run(args []string) error {
 		return handleForceUnlock(c, commandArgs)
 	case "list-active-jobs":
 		return handleListActiveJobs(c, commandArgs)
+	case "prune-storage":
+		return handlePruneStorage(c, commandArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
@@ -1458,4 +1471,160 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// handlePruneStorage handles the prune-storage command
+func handlePruneStorage(c *client.Client, args []string) error {
+	var dryRun bool
+	var project string
+	var all bool
+	var allNodes bool
+	var force bool
+	var watch bool
+
+	// Parse flags
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--dry-run" {
+			dryRun = true
+			i++
+		} else if arg == "--project" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("--project flag requires a value")
+			}
+			project = args[i+1]
+			i += 2
+		} else if strings.HasPrefix(arg, "--project=") {
+			project = strings.TrimPrefix(arg, "--project=")
+			i++
+		} else if arg == "--all" {
+			all = true
+			i++
+		} else if arg == "--all-nodes" {
+			allNodes = true
+			i++
+		} else if arg == "--force" || arg == "-f" {
+			force = true
+			i++
+		} else if arg == "--watch" || arg == "-w" {
+			watch = true
+			i++
+		} else if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown flag: %s", arg)
+		} else {
+			i++
+		}
+	}
+
+	// Safety confirmation for aggressive prune without --force
+	if all && !force && !dryRun {
+		fmt.Println("WARNING: Aggressive prune will remove ALL cached images and build layers!")
+		fmt.Println("This cannot be undone and will slow down subsequent builds.")
+		fmt.Print("Are you sure? Type 'yes' to confirm: ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if confirm != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	// Build request
+	req := &types.PruneStorageRequest{
+		Project:  project,
+		All:      all,
+		AllNodes: allNodes,
+		DryRun:   dryRun,
+		Force:    force,
+	}
+
+	// Submit prune job
+	response, err := c.PruneStorage(req)
+	if err != nil {
+		return fmt.Errorf("failed to submit prune storage job: %w", err)
+	}
+
+	// Display response
+	if response.Success {
+		fmt.Printf("Prune storage job submitted: %s\n", response.JobID)
+		fmt.Printf("Message: %s\n", response.Message)
+	} else {
+		return fmt.Errorf("failed to submit prune job: %s", response.Message)
+	}
+
+	// Display warnings
+	for _, warning := range response.Warnings {
+		fmt.Printf("Warning: %s\n", warning)
+	}
+
+	// Watch job progress if requested
+	if watch && response.JobID != "" {
+		fmt.Println()
+		return watchPruneJob(c, response.JobID)
+	}
+
+	// Provide hint about watching
+	if !watch && response.JobID != "" {
+		fmt.Printf("\nTo watch progress: jobforge get-status %s\n", response.JobID)
+		fmt.Printf("To see logs: jobforge get-logs %s\n", response.JobID)
+	}
+
+	return nil
+}
+
+// watchPruneJob watches a prune job until it completes
+func watchPruneJob(c *client.Client, pruneJobID string) error {
+	fmt.Printf("Watching prune job: %s\n", pruneJobID)
+
+	// Poll for status updates
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.After(10 * time.Minute) // Max wait time for prune
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get job status using the general status endpoint
+			// The prune job is a regular Nomad batch job
+			status, logs, err := c.GetPruneJobStatus(pruneJobID)
+			if err != nil {
+				// Job might not be found yet if just submitted
+				continue
+			}
+
+			// Print status
+			timestamp := time.Now().Format("15:04:05")
+			switch status {
+			case "running", "pending":
+				fmt.Printf("[%s] ⏳ Status: %s\n", timestamp, status)
+			case "complete":
+				fmt.Printf("[%s] ✅ Prune completed successfully\n", timestamp)
+
+				// Display logs
+				if len(logs) > 0 {
+					fmt.Println("\n=== Prune Job Logs ===")
+					for _, line := range logs {
+						fmt.Println(line)
+					}
+				}
+				return nil
+			case "failed":
+				fmt.Printf("[%s] ❌ Prune job failed\n", timestamp)
+
+				// Display logs
+				if len(logs) > 0 {
+					fmt.Println("\n=== Prune Job Logs ===")
+					for _, line := range logs {
+						fmt.Println(line)
+					}
+				}
+				return fmt.Errorf("prune job failed")
+			}
+
+		case <-timeout:
+			return fmt.Errorf("timed out waiting for prune job to complete")
+		}
+	}
 }

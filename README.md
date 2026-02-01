@@ -83,6 +83,11 @@ jobforge list-locks --stale-only  # List only stale locks
 jobforge force-unlock <lock-key>  # Force release a lock
 jobforge list-active-jobs --owner <owner>  # List active jobs
 
+# Storage management
+jobforge prune-storage --dry-run  # Preview what would be cleaned
+jobforge prune-storage            # Conservative prune (dangling images, old caches)
+jobforge prune-storage --all --force  # Aggressive prune (all cached images)
+
 # Version management
 jobforge version-info           # Show current version and branch
 jobforge version-major <ver>    # Set major version (resets minor/patch to 0)
@@ -119,6 +124,9 @@ Direct HTTP/JSON endpoints for testing and non-MCP integrations:
 - `GET /json/locks` - List all build locks
 - `POST /json/locks/force-unlock` - Force release locks
 - `GET /json/active-jobs?owner=<owner>` - List active jobs for an owner
+
+### Storage Management Endpoints
+- `POST /json/prune-storage` - Submit storage prune job
 
 ### 3. Health & Monitoring
 

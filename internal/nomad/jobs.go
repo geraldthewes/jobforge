@@ -1206,7 +1206,7 @@ func (nc *Client) buildTestResources(job *types.Job, cpu, memory, disk int) *nom
 	// 1. Docker's nvidia runtime (set in configureTestDockerConfig)
 	// 2. NVIDIA_VISIBLE_DEVICES env var (set by user in test.env)
 	// This approach works without requiring Nomad device plugins.
-	
+
 	resources := &nomadapi.Resources{
 		CPU:      intPtr(cpu),
 		MemoryMB: intPtr(memory),
@@ -1214,4 +1214,214 @@ func (nc *Client) buildTestResources(job *types.Job, cpu, memory, disk int) *nom
 	}
 
 	return resources
+}
+
+// createPruneStorageJobSpec creates a Nomad job specification for pruning buildah storage cache
+func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, pruneJobID string) *nomadapi.Job {
+	// Determine job type: sysbatch for all nodes, batch for single node
+	jobType := "batch"
+	if req.AllNodes {
+		jobType = "sysbatch"
+	}
+
+	// Build the prune commands
+	pruneCommands := []string{
+		"#!/bin/bash",
+		"set -euo pipefail",
+		"",
+		"echo '=== Buildah Storage Prune Started ==='",
+		"echo \"Hostname: $(hostname)\"",
+		"echo \"Time: $(date -Iseconds)\"",
+		"echo ''",
+		"",
+		"# Storage location",
+		"STORAGE_ROOT='/var/lib/containers'",
+		"",
+		"# Show current storage usage",
+		"echo '=== Current Storage Usage ==='",
+		"du -sh $STORAGE_ROOT 2>/dev/null || echo 'Storage directory not found'",
+		"echo ''",
+		"",
+	}
+
+	if req.Project != "" {
+		// Project-specific prune
+		sanitizedProject := req.Project
+		pruneCommands = append(pruneCommands,
+			fmt.Sprintf("echo '=== Pruning cache for project: %s ==='", sanitizedProject),
+			fmt.Sprintf("PROJECT_DIR=\"$STORAGE_ROOT/%s\"", sanitizedProject),
+			"",
+			"if [ -d \"$PROJECT_DIR\" ]; then",
+			"  echo \"Project cache directory: $PROJECT_DIR\"",
+			"  du -sh \"$PROJECT_DIR\" 2>/dev/null || echo 'Unable to determine size'",
+		)
+
+		if req.DryRun {
+			pruneCommands = append(pruneCommands,
+				"  echo ''",
+				"  echo '[DRY RUN] Would remove project cache directory'",
+				"  echo \"[DRY RUN] Would free: $(du -sh \"$PROJECT_DIR\" 2>/dev/null | cut -f1)\"",
+			)
+		} else {
+			pruneCommands = append(pruneCommands,
+				"  echo ''",
+				"  echo 'Removing project cache...'",
+				"  rm -rf \"$PROJECT_DIR\"",
+				"  echo 'Project cache removed successfully'",
+			)
+		}
+
+		pruneCommands = append(pruneCommands,
+			"else",
+			"  echo 'Project cache directory not found'",
+			"fi",
+			"",
+		)
+	} else if req.All {
+		// Aggressive full prune
+		pruneCommands = append(pruneCommands,
+			"echo '=== Aggressive Full Prune ==='",
+			"echo 'WARNING: This will remove ALL cached images and build layers'",
+			"echo ''",
+		)
+
+		if req.DryRun {
+			pruneCommands = append(pruneCommands,
+				"echo '[DRY RUN] Would execute:'",
+				"echo '  - buildah rm --all'",
+				"echo '  - buildah rmi --all --force'",
+				"echo '  - rm -rf $STORAGE_ROOT/*'",
+				"echo ''",
+				"echo '[DRY RUN] Current usage that would be freed:'",
+				"du -sh $STORAGE_ROOT/* 2>/dev/null || echo 'No subdirectories found'",
+			)
+		} else {
+			pruneCommands = append(pruneCommands,
+				"# Remove all build containers",
+				"echo 'Removing all build containers...'",
+				"buildah rm --all 2>/dev/null || echo 'No containers to remove'",
+				"",
+				"# Remove all images",
+				"echo 'Removing all images...'",
+				"buildah rmi --all --force 2>/dev/null || echo 'No images to remove'",
+				"",
+				"# Clean up storage directories",
+				"echo 'Cleaning up storage directories...'",
+				"rm -rf $STORAGE_ROOT/* 2>/dev/null || echo 'Storage already clean'",
+				"",
+				"echo 'Aggressive prune completed'",
+			)
+		}
+	} else {
+		// Conservative prune (default)
+		pruneCommands = append(pruneCommands,
+			"echo '=== Conservative Prune ==='",
+			"echo 'Removing dangling images and caches older than 24 hours'",
+			"echo ''",
+		)
+
+		if req.DryRun {
+			pruneCommands = append(pruneCommands,
+				"echo '[DRY RUN] Would execute:'",
+				"echo '  - buildah rm --all (remove build containers)'",
+				"echo '  - buildah rmi --prune (remove dangling images)'",
+				"echo '  - buildah system prune --filter until=24h'",
+				"echo ''",
+				"echo '[DRY RUN] Current storage breakdown:'",
+				"du -sh $STORAGE_ROOT/* 2>/dev/null || echo 'No subdirectories found'",
+				"echo ''",
+				"echo '[DRY RUN] Dangling images:'",
+				"buildah images --filter dangling=true 2>/dev/null || echo 'Unable to list dangling images'",
+			)
+		} else {
+			pruneCommands = append(pruneCommands,
+				"# Remove build containers",
+				"echo 'Removing build containers...'",
+				"buildah rm --all 2>/dev/null || echo 'No containers to remove'",
+				"",
+				"# Remove dangling/unused images",
+				"echo 'Removing dangling images...'",
+				"buildah rmi --prune 2>/dev/null || echo 'No dangling images to prune'",
+				"",
+				"# Prune caches older than 24 hours",
+				"echo 'Pruning old caches (>24h)...'",
+				"# Find and remove cache directories older than 24 hours",
+				"find $STORAGE_ROOT -type d -name 'cache' -mtime +1 -exec rm -rf {} \\; 2>/dev/null || true",
+				"",
+				"echo 'Conservative prune completed'",
+			)
+		}
+	}
+
+	// Add final storage usage report
+	pruneCommands = append(pruneCommands,
+		"",
+		"echo ''",
+		"echo '=== Final Storage Usage ==='",
+		"du -sh $STORAGE_ROOT 2>/dev/null || echo 'Storage directory empty or not found'",
+		"echo ''",
+		"echo '=== Prune Completed ==='",
+	)
+
+	jobSpec := &nomadapi.Job{
+		ID:          &pruneJobID,
+		Name:        &pruneJobID,
+		Type:        stringPtr(jobType),
+		Namespace:   stringPtr(nc.config.Nomad.Namespace),
+		Region:      stringPtr(nc.config.Nomad.Region),
+		Datacenters: nc.config.Nomad.Datacenters,
+		Meta: map[string]string{
+			"operation":  "prune-storage",
+			"dry_run":    fmt.Sprintf("%t", req.DryRun),
+			"all":        fmt.Sprintf("%t", req.All),
+			"all_nodes":  fmt.Sprintf("%t", req.AllNodes),
+		},
+		TaskGroups: []*nomadapi.TaskGroup{
+			{
+				Name:  stringPtr("prune"),
+				Count: intPtr(1),
+				RestartPolicy: &nomadapi.RestartPolicy{
+					Attempts: intPtr(0), // No restart for prune jobs
+				},
+				Tasks: []*nomadapi.Task{
+					{
+						Name:   "main",
+						Driver: "docker",
+						Config: map[string]interface{}{
+							"image":      "quay.io/buildah/stable:latest",
+							"command":    "/bin/bash",
+							"args":       []string{"-c", strings.Join(pruneCommands, "\n")},
+							"privileged": true, // Required for storage access
+							"volumes": []string{
+								"/opt/nomad/data/buildah-cache:/var/lib/containers:rw", // Persistent layer cache
+							},
+						},
+						Env: map[string]string{
+							"BUILDAH_ISOLATION": "chroot",
+							"STORAGE_DRIVER":    "overlay",
+						},
+						Resources: &nomadapi.Resources{
+							CPU:      intPtr(200),
+							MemoryMB: intPtr(512),
+						},
+						KillTimeout: durationPtr("2m"),
+						LogConfig: &nomadapi.LogConfig{
+							MaxFiles:      intPtr(3),
+							MaxFileSizeMB: intPtr(5),
+						},
+					},
+				},
+				EphemeralDisk: &nomadapi.EphemeralDisk{
+					SizeMB: intPtr(100),
+				},
+			},
+		},
+	}
+
+	// Add project metadata if specified
+	if req.Project != "" {
+		jobSpec.Meta["project"] = req.Project
+	}
+
+	return jobSpec
 }

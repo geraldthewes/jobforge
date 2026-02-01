@@ -124,6 +124,10 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/json/active-jobs", s.handleListActiveJobs)
 	mux.HandleFunc("/mcp/active-jobs", s.handleListActiveJobs)
 
+	// Storage management endpoints
+	mux.HandleFunc("/json/prune-storage", s.handlePruneStorage)
+	mux.HandleFunc("/mcp/prune-storage", s.handlePruneStorage)
+
 	// MCP Protocol endpoints
 	mux.HandleFunc("/mcp", s.handleMCPRequest)           // JSON-RPC over HTTP
 
@@ -1211,6 +1215,8 @@ func (s *Server) handleMCPToolsCall(req MCPRequest) MCPResponse {
 		response = s.mcpGetHistory(req.ID, arguments)
 	case "purgeFailedJob":
 		response = s.mcpPurgeFailedJob(req.ID, arguments)
+	case "pruneStorage":
+		response = s.mcpPruneStorage(req.ID, arguments)
 	default:
 		response = NewMCPErrorResponse(req.ID, MCPErrorMethodNotFound, "Tool not found", toolName)
 	}
@@ -1598,6 +1604,134 @@ func (s *Server) mcpPurgeFailedJob(id interface{}, args map[string]interface{}) 
 
 	result := ToolCallResult{
 		Content: NewMCPTextContent(fmt.Sprintf("Job %s purged successfully from Nomad", jobID)),
+	}
+	return NewMCPResponse(id, result)
+}
+
+// handlePruneStorage handles storage prune requests
+func (s *Server) handlePruneStorage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req types.PruneStorageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, "Invalid request body", http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Log request details at debug level
+	if s.logger.Level >= logrus.DebugLevel {
+		reqJSON, _ := json.MarshalIndent(req, "", "  ")
+		s.logger.WithFields(map[string]interface{}{
+			"endpoint":    "pruneStorage",
+			"remote_addr": r.RemoteAddr,
+			"request":     string(reqJSON),
+		}).Debug("Prune storage request details")
+	}
+
+	// Safety check: warn about active builds
+	var warnings []string
+	if !req.Force {
+		activeBuilds, err := s.nomadClient.CheckActiveBuildJobs()
+		if err != nil {
+			s.logger.WithError(err).Warn("Failed to check for active build jobs")
+		} else if len(activeBuilds) > 0 {
+			warnings = append(warnings, fmt.Sprintf("Warning: %d active build job(s) detected. Use --force to proceed anyway.", len(activeBuilds)))
+			if !req.DryRun {
+				// For non-dry-run without force, reject if aggressive prune requested
+				if req.All {
+					s.writeErrorResponse(w, "Cannot perform aggressive prune with active builds", http.StatusConflict,
+						fmt.Sprintf("%d active build(s) detected. Use --force to override.", len(activeBuilds)))
+					return
+				}
+			}
+		}
+	}
+
+	// Submit prune job
+	pruneJobID, err := s.nomadClient.RunPruneStorage(&req)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to submit prune storage job", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := types.PruneStorageResponse{
+		Success:  true,
+		JobID:    pruneJobID,
+		Message:  "Prune storage job submitted successfully",
+		Warnings: warnings,
+	}
+
+	if req.DryRun {
+		response.Message = "Prune storage job submitted in dry-run mode (no actual deletions)"
+	}
+
+	s.writeJSONResponse(w, response)
+
+	s.logger.WithFields(logrus.Fields{
+		"prune_job_id": pruneJobID,
+		"dry_run":      req.DryRun,
+		"all":          req.All,
+		"all_nodes":    req.AllNodes,
+		"project":      req.Project,
+	}).Info("Prune storage job submitted")
+}
+
+// mcpPruneStorage handles the MCP pruneStorage tool call
+func (s *Server) mcpPruneStorage(id interface{}, args map[string]interface{}) MCPResponse {
+	req := types.PruneStorageRequest{}
+
+	if project, ok := args["project"].(string); ok {
+		req.Project = project
+	}
+	if all, ok := args["all"].(bool); ok {
+		req.All = all
+	}
+	if allNodes, ok := args["all_nodes"].(bool); ok {
+		req.AllNodes = allNodes
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok {
+		req.DryRun = dryRun
+	}
+	if force, ok := args["force"].(bool); ok {
+		req.Force = force
+	}
+
+	// Safety check: warn about active builds
+	var warnings []string
+	if !req.Force {
+		activeBuilds, err := s.nomadClient.CheckActiveBuildJobs()
+		if err != nil {
+			s.logger.WithError(err).Warn("Failed to check for active build jobs")
+		} else if len(activeBuilds) > 0 {
+			warnings = append(warnings, fmt.Sprintf("Warning: %d active build job(s) detected", len(activeBuilds)))
+			if !req.DryRun && req.All {
+				return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Cannot perform aggressive prune with active builds",
+					fmt.Sprintf("%d active build(s) detected. Use force=true to override.", len(activeBuilds)))
+			}
+		}
+	}
+
+	// Submit prune job
+	pruneJobID, err := s.nomadClient.RunPruneStorage(&req)
+	if err != nil {
+		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to submit prune storage job", err.Error())
+	}
+
+	message := "Prune storage job submitted successfully"
+	if req.DryRun {
+		message = "Prune storage job submitted in dry-run mode (no actual deletions)"
+	}
+
+	result := ToolCallResult{
+		Content: NewMCPJSONContent(map[string]interface{}{
+			"success":  true,
+			"job_id":   pruneJobID,
+			"message":  message,
+			"warnings": warnings,
+		}),
 	}
 	return NewMCPResponse(id, result)
 }

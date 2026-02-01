@@ -126,3 +126,20 @@ type ReportTestResultResponse struct {
 	Status  JobStatus `json:"status"`   // New job status after processing result
 	Message string    `json:"message"`
 }
+
+// PruneStorageRequest represents a request to prune buildah storage cache
+type PruneStorageRequest struct {
+	Project  string `json:"project,omitempty"`   // Optional: prune only specific project's cache
+	All      bool   `json:"all,omitempty"`       // Aggressive prune: remove all images and caches
+	AllNodes bool   `json:"all_nodes,omitempty"` // Prune on all Nomad nodes (sysbatch)
+	DryRun   bool   `json:"dry_run,omitempty"`   // Preview what would be cleaned
+	Force    bool   `json:"force,omitempty"`     // Skip confirmation for aggressive prune
+}
+
+// PruneStorageResponse represents the response from a prune storage request
+type PruneStorageResponse struct {
+	Success  bool     `json:"success"`
+	JobID    string   `json:"job_id,omitempty"`    // Nomad job ID for tracking the prune operation
+	Message  string   `json:"message"`
+	Warnings []string `json:"warnings,omitempty"`  // Any warnings (e.g., active builds)
+}
