@@ -1056,14 +1056,21 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 	// Create python-executor client
 	pyClient := pyexec.New(pyexecServer)
 
-	// Build metadata with environment variables for the container
+	// Build metadata with environment variables for python-executor
+	envVars := []string{
+		fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost),
+		fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort),
+	}
+
+	// Add user-defined python environment variables
+	for key, value := range jobConfig.Test.PythonEnv {
+		envVars = append(envVars, fmt.Sprintf("%s=%s", key, value))
+	}
+
 	metadata := &pyexec.Metadata{
 		Entrypoint:      jobConfig.Test.PythonFile,
 		RequirementsTxt: requirementsContent,
-		EnvVars: []string{
-			fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost),
-			fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort),
-		},
+		EnvVars:         envVars,
 	}
 
 	// Execute the Python tests

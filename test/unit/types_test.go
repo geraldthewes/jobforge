@@ -325,6 +325,114 @@ func TestVaultSecret(t *testing.T) {
 	})
 }
 
+func TestTestConfigWithPythonEnv(t *testing.T) {
+	t.Run("TestConfig with python_env alongside env", func(t *testing.T) {
+		testConfig := &types.TestConfig{
+			PythonCwd:          "tests",
+			PythonFile:         "test_api.py",
+			PythonRequirements: "requirements.txt",
+			HealthEndpoint:     "/health",
+			HealthTimeout:      120,
+			ContainerPort:      8080,
+			// Container environment (for the service being tested)
+			Env: map[string]string{
+				"LOG_LEVEL": "debug",
+			},
+			// Python executor environment (for the test runner)
+			PythonEnv: map[string]string{
+				"TEST_API_KEY":      "test-key-12345",
+				"TEST_TIMEOUT":      "30",
+				"PYTEST_VERBOSITY":  "2",
+			},
+		}
+
+		// Verify Env field
+		if len(testConfig.Env) != 1 {
+			t.Errorf("Expected 1 env entry, got %d", len(testConfig.Env))
+		}
+		if testConfig.Env["LOG_LEVEL"] != "debug" {
+			t.Errorf("Expected LOG_LEVEL='debug', got %s", testConfig.Env["LOG_LEVEL"])
+		}
+
+		// Verify PythonEnv field
+		if len(testConfig.PythonEnv) != 3 {
+			t.Errorf("Expected 3 python_env entries, got %d", len(testConfig.PythonEnv))
+		}
+		if testConfig.PythonEnv["TEST_API_KEY"] != "test-key-12345" {
+			t.Errorf("Expected TEST_API_KEY='test-key-12345', got %s", testConfig.PythonEnv["TEST_API_KEY"])
+		}
+		if testConfig.PythonEnv["TEST_TIMEOUT"] != "30" {
+			t.Errorf("Expected TEST_TIMEOUT='30', got %s", testConfig.PythonEnv["TEST_TIMEOUT"])
+		}
+		if testConfig.PythonEnv["PYTEST_VERBOSITY"] != "2" {
+			t.Errorf("Expected PYTEST_VERBOSITY='2', got %s", testConfig.PythonEnv["PYTEST_VERBOSITY"])
+		}
+	})
+
+	t.Run("TestConfig with empty python_env", func(t *testing.T) {
+		testConfig := &types.TestConfig{
+			PythonFile: "test_api.py",
+			PythonEnv:  map[string]string{},
+		}
+
+		if len(testConfig.PythonEnv) != 0 {
+			t.Errorf("Expected 0 python_env entries, got %d", len(testConfig.PythonEnv))
+		}
+	})
+
+	t.Run("TestConfig with nil python_env", func(t *testing.T) {
+		testConfig := &types.TestConfig{
+			PythonFile: "test_api.py",
+			// PythonEnv is nil by default
+		}
+
+		if testConfig.PythonEnv != nil {
+			t.Errorf("Expected nil python_env, got %v", testConfig.PythonEnv)
+		}
+	})
+
+	t.Run("JobConfig with python_env in test config", func(t *testing.T) {
+		jobConfig := types.JobConfig{
+			Owner:          "test-user",
+			RepoURL:        "https://github.com/test/repo.git",
+			GitRef:         "main",
+			DockerfilePath: "Dockerfile",
+			ImageName:      "test-app",
+			ImageTags:      []string{"latest"},
+			RegistryURL:    "registry.example.com/test-app",
+			Test: &types.TestConfig{
+				PythonCwd:          "tests",
+				PythonFile:         "test_api.py",
+				PythonRequirements: "requirements.txt",
+				ContainerPort:      8080,
+				Env: map[string]string{
+					"NODE_ENV": "test",
+				},
+				PythonEnv: map[string]string{
+					"API_KEY":      "secret-key",
+					"DEBUG_TESTS":  "true",
+				},
+			},
+		}
+
+		if jobConfig.Test == nil {
+			t.Fatal("Expected Test config to be non-nil")
+		}
+
+		if len(jobConfig.Test.Env) != 1 {
+			t.Errorf("Expected 1 env entry, got %d", len(jobConfig.Test.Env))
+		}
+
+		if len(jobConfig.Test.PythonEnv) != 2 {
+			t.Errorf("Expected 2 python_env entries, got %d", len(jobConfig.Test.PythonEnv))
+		}
+
+		if jobConfig.Test.PythonEnv["API_KEY"] != "secret-key" {
+			t.Errorf("Expected API_KEY='secret-key', got %s", jobConfig.Test.PythonEnv["API_KEY"])
+		}
+	})
+}
+
 func TestTestConfigWithVaultSecrets(t *testing.T) {
 	t.Run("TestConfig with vault_secrets", func(t *testing.T) {
 		testConfig := &types.TestConfig{

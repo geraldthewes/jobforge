@@ -231,6 +231,7 @@ For web services where you need to test the API from outside the container, you 
 | `test.health_endpoint` | string | `"/health"` | Health check endpoint to poll before running tests |
 | `test.health_timeout` | integer | `60` | Seconds to wait for health check |
 | `test.container_port` | integer | `8080` | Port the container exposes for the web service |
+| `test.python_env` | map[string]string | `{}` | Environment variables passed to python-executor process (separate from container `env`) |
 
 **How It Works**:
 
@@ -251,6 +252,13 @@ For web services where you need to test the API from outside the container, you 
 **Environment Variables Injected**:
 - `SERVICE_HOST` - IP address of the running test container
 - `SERVICE_PORT` - Dynamic port assigned by Nomad
+- All variables from `python_env` map (if specified)
+
+**Difference between `env` and `python_env`:**
+- `env` - Environment variables for the Docker container (the service being tested)
+- `python_env` - Environment variables for the python-executor process (the test runner)
+
+Use `python_env` when your Python test code needs configuration values such as API keys for external services, test timeouts, or pytest options.
 
 **Example**:
 
@@ -263,8 +271,14 @@ test:
   health_endpoint: "/health"
   health_timeout: 120
   container_port: 8080
+  # Environment variables for the container (service under test)
   env:
     LOG_LEVEL: "debug"
+  # Environment variables for python-executor (test runner)
+  python_env:
+    TEST_API_KEY: "test-key-12345"
+    TEST_TIMEOUT: "30"
+    PYTEST_VERBOSITY: "2"
   vault_policies:
     - api-secrets-policy
   vault_secrets:

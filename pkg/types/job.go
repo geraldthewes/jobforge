@@ -48,6 +48,7 @@ type TestConfig struct {
 	HealthEndpoint     string `json:"health_endpoint,omitempty" yaml:"health_endpoint,omitempty"`           // Health check endpoint to poll before tests (default: /health)
 	HealthTimeout      int    `json:"health_timeout,omitempty" yaml:"health_timeout,omitempty"`             // Seconds to wait for health check (default: 60)
 	ContainerPort      int    `json:"container_port,omitempty" yaml:"container_port,omitempty"`             // Port the container exposes (default: 8080)
+	PythonEnv          map[string]string `json:"python_env,omitempty" yaml:"python_env,omitempty"`          // Environment variables for python-executor (separate from container env)
 }
 
 // JobConfig represents the configuration for a build job
