@@ -1230,7 +1230,7 @@ func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, prun
 		"set -euo pipefail",
 		"",
 		"echo '=== Buildah Storage Prune Started ==='",
-		"echo \"Hostname: $(hostname)\"",
+		"echo \"Node: $(cat /proc/sys/kernel/hostname 2>/dev/null || echo 'unknown')\"",
 		"echo \"Time: $(date -Iseconds)\"",
 		"echo ''",
 		"",

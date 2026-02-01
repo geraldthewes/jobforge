@@ -127,6 +127,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Storage management endpoints
 	mux.HandleFunc("/json/prune-storage", s.handlePruneStorage)
 	mux.HandleFunc("/mcp/prune-storage", s.handlePruneStorage)
+	mux.HandleFunc("/json/prune-job/", s.handlePruneJobStatus)
 
 	// MCP Protocol endpoints
 	mux.HandleFunc("/mcp", s.handleMCPRequest)           // JSON-RPC over HTTP
@@ -1677,6 +1678,46 @@ func (s *Server) handlePruneStorage(w http.ResponseWriter, r *http.Request) {
 		"all_nodes":    req.AllNodes,
 		"project":      req.Project,
 	}).Info("Prune storage job submitted")
+}
+
+// handlePruneJobStatus handles GET /json/prune-job/{jobID}/status
+// This queries Nomad directly for prune job status (not Consul storage)
+func (s *Server) handlePruneJobStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse URL path: /json/prune-job/{jobID}/status
+	path := strings.TrimPrefix(r.URL.Path, "/json/prune-job/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) < 2 || parts[1] != "status" {
+		http.Error(w, "Invalid path. Use /json/prune-job/{jobID}/status", http.StatusBadRequest)
+		return
+	}
+
+	jobID := parts[0]
+	if jobID == "" {
+		http.Error(w, "Job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	status, logs, err := s.nomadClient.GetPruneJobStatus(jobID)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to get prune job status", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := struct {
+		Status string   `json:"status"`
+		Logs   []string `json:"logs,omitempty"`
+	}{
+		Status: status,
+		Logs:   logs,
+	}
+
+	s.writeJSONResponse(w, response)
 }
 
 // mcpPruneStorage handles the MCP pruneStorage tool call

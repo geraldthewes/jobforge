@@ -417,8 +417,8 @@ func (c *Client) PruneStorage(req *types.PruneStorageRequest) (*types.PruneStora
 
 // GetPruneJobStatus gets the status and logs for a prune job
 func (c *Client) GetPruneJobStatus(pruneJobID string) (string, []string, error) {
-	// Use the Nomad job status endpoint via direct REST call
-	resp, err := c.doRequest("GET", fmt.Sprintf("/json/job/%s/status", pruneJobID), nil)
+	// Use the dedicated prune job status endpoint (queries Nomad directly)
+	resp, err := c.doRequest("GET", fmt.Sprintf("/json/prune-job/%s/status", pruneJobID), nil)
 	if err != nil {
 		return "", nil, err
 	}
