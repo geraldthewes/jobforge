@@ -1016,12 +1016,6 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 		cmdArgs = append(cmdArgs, "--requirements", jobConfig.Test.PythonRequirements)
 	}
 
-	// Pass service endpoint as container environment variables via -e flags
-	// These must be passed as args to python-executor, not as local env vars,
-	// because python-executor runs the Python script inside a Docker container
-	cmdArgs = append(cmdArgs, "-e", fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost))
-	cmdArgs = append(cmdArgs, "-e", fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort))
-
 	cmd := exec.Command("python-executor", cmdArgs...)
 
 	// Set working directory
@@ -1029,8 +1023,10 @@ func runPythonTests(jobID, serviceURL string, jobConfig *types.JobConfig) error 
 		cmd.Dir = jobConfig.Test.PythonCwd
 	}
 
-	// Inherit local environment for PYEXEC_SERVER etc
+	// Set environment variables
 	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SERVICE_HOST=%s", endpoint.ServiceHost))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SERVICE_PORT=%d", endpoint.ServicePort))
 
 	// Capture output while also printing to console
 	var stdout, stderr bytes.Buffer
