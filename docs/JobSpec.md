@@ -99,6 +99,42 @@ Each constraint specifies a Nomad node attribute to match:
   - You can override by setting `NVIDIA_VISIBLE_DEVICES` in `test.env` (e.g., `"0"`, `"0,1"`)
   - This approach works without requiring Nomad NVIDIA device plugins
 
+**GPU Availability Check**:
+
+When `gpu_required: true`, jobforge automatically adds a prestart task that checks GPU availability via Consul KV before running the test. This prevents CUDA OOM errors when another GPU job is already consuming the GPU on a node.
+
+- **How it works**: A prestart task checks if `gpu/occupied/<node-name>` exists in Consul KV
+- **If GPU is occupied**: The prestart task fails and Nomad reschedules to another node
+- **If GPU is available**: The test proceeds normally
+- **Reschedule policy**: GPU jobs get an enhanced reschedule policy (10 attempts over 30 minutes with exponential backoff)
+
+**Prerequisites for GPU Availability Check**:
+
+For this feature to work, GPU-consuming jobs (e.g., hunyuan-ocr, ML inference services) must set and clear Consul KV keys:
+
+```bash
+# At job start (in prestart hook or startup script):
+consul kv put gpu/occupied/$(hostname) "job-name"
+
+# At job end (in poststop hook or cleanup script):
+consul kv delete gpu/occupied/$(hostname)
+```
+
+Example Nomad job hook for GPU occupation:
+```hcl
+task "main" {
+  lifecycle {
+    hook = "prestart"
+    sidecar = false
+  }
+  driver = "exec"
+  config {
+    command = "/bin/sh"
+    args    = ["-c", "consul kv put gpu/occupied/${node.unique.name} ${NOMAD_JOB_NAME}"]
+  }
+}
+```
+
 **Examples**:
 
 ```yaml

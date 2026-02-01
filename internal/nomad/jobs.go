@@ -281,8 +281,8 @@ func (nc *Client) createBuildJobSpec(job *types.Job) (*nomadapi.Job, error) {
 	return jobSpec, nil
 }
 
-// createTestJobSpecs creates Nomad job specifications for the test phase using Docker driver directly
-func (nc *Client) createTestJobSpecs(job *types.Job, buildNodeID string) ([]*nomadapi.Job, error) {
+// CreateTestJobSpecs creates Nomad job specifications for the test phase using Docker driver directly
+func (nc *Client) CreateTestJobSpecs(job *types.Job, buildNodeID string) ([]*nomadapi.Job, error) {
 	var testJobs []*nomadapi.Job
 
 	// If no test configuration, return empty array
@@ -400,11 +400,21 @@ func (nc *Client) createTestJobSpecs(job *types.Job, buildNodeID string) ([]*nom
 					mainTask.Templates = templates
 				}
 			}
-			
+
+			// Add GPU availability check for GPU-required tests
+			if job.Config.Test.GPURequired {
+				gpuCheckTask := nc.createGPUAvailabilityCheckTask()
+				testJobSpec.TaskGroups[0].Tasks = append(
+					[]*nomadapi.Task{gpuCheckTask},
+					testJobSpec.TaskGroups[0].Tasks...,
+				)
+				testJobSpec.TaskGroups[0].ReschedulePolicy = gpuReschedulePolicy()
+			}
+
 			testJobs = append(testJobs, testJobSpec)
 		}
 	}
-	
+
 	// Mode 2: Create a test job that runs the image's entry point/CMD
 	if job.Config.Test.EntryPoint {
 		jobID := fmt.Sprintf("test-entry-%s", job.ID)
@@ -476,10 +486,20 @@ func (nc *Client) createTestJobSpecs(job *types.Job, buildNodeID string) ([]*nom
 				mainTask.Templates = templates
 			}
 		}
-		
+
+		// Add GPU availability check for GPU-required tests
+		if job.Config.Test.GPURequired {
+			gpuCheckTask := nc.createGPUAvailabilityCheckTask()
+			testJobSpec.TaskGroups[0].Tasks = append(
+				[]*nomadapi.Task{gpuCheckTask},
+				testJobSpec.TaskGroups[0].Tasks...,
+			)
+			testJobSpec.TaskGroups[0].ReschedulePolicy = gpuReschedulePolicy()
+		}
+
 		testJobs = append(testJobs, testJobSpec)
 	}
-	
+
 	// If no test configuration, return empty array (caller will skip test phase)
 	if len(testJobs) == 0 {
 		return []*nomadapi.Job{}, nil
@@ -624,6 +644,17 @@ func (nc *Client) createExternalTestJobSpec(job *types.Job, buildNodeID string) 
 			}
 			mainTask.Templates = templates
 		}
+	}
+
+	// Add GPU availability check for GPU-required external tests
+	if job.Config.Test != nil && job.Config.Test.GPURequired {
+		gpuCheckTask := nc.createGPUAvailabilityCheckTask()
+		testJobSpec.TaskGroups[0].Tasks = append(
+			[]*nomadapi.Task{gpuCheckTask},
+			testJobSpec.TaskGroups[0].Tasks...,
+		)
+		// Note: Service jobs have different reschedule semantics, but the prestart
+		// failure will still prevent the main task from running
 	}
 
 	return testJobSpec, nil
@@ -1231,6 +1262,45 @@ func (nc *Client) buildTestResources(job *types.Job, cpu, memory, disk int) *nom
 	}
 
 	return resources
+}
+
+// createGPUAvailabilityCheckTask creates a prestart lifecycle task that checks
+// GPU availability via Consul KV before running GPU-dependent tests.
+// If the key gpu/occupied/<node-name> exists, the prestart fails and Nomad reschedules.
+func (nc *Client) createGPUAvailabilityCheckTask() *nomadapi.Task {
+	// Check if GPU is occupied on this node via Consul KV
+	// Uses Nomad's ${node.unique.name} interpolation for the node name
+	checkCommand := `if consul kv get gpu/occupied/${node.unique.name} >/dev/null 2>&1; then echo "GPU on ${node.unique.name} is occupied by another job"; exit 1; fi; echo "GPU available on ${node.unique.name}"`
+
+	return &nomadapi.Task{
+		Name:   "gpu-availability-check",
+		Driver: "exec",
+		Config: map[string]interface{}{
+			"command": "/bin/sh",
+			"args":    []string{"-c", checkCommand},
+		},
+		Lifecycle: &nomadapi.TaskLifecycle{
+			Hook:    "prestart",
+			Sidecar: false,
+		},
+		Resources: &nomadapi.Resources{
+			CPU:      intPtr(50),
+			MemoryMB: intPtr(32),
+		},
+	}
+}
+
+// gpuReschedulePolicy returns a reschedule policy for GPU jobs
+// that allows retrying on other nodes when GPU is occupied
+func gpuReschedulePolicy() *nomadapi.ReschedulePolicy {
+	return &nomadapi.ReschedulePolicy{
+		Attempts:      intPtr(10),
+		Interval:      durationPtr("30m"),
+		Delay:         durationPtr("15s"),
+		DelayFunction: stringPtr("exponential"),
+		MaxDelay:      durationPtr("5m"),
+		Unlimited:     boolPtr(false),
+	}
 }
 
 // createPruneStorageJobSpec creates a Nomad job specification for pruning buildah storage cache

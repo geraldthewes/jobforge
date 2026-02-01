@@ -1265,7 +1265,7 @@ func (nc *Client) startTestPhase(job *types.Job) error {
 		"build_node_id": buildNodeID,
 	}).Info("Starting test phase with node constraint to avoid Docker layer conflicts")
 	
-	testJobSpecs, err := nc.createTestJobSpecs(job, buildNodeID)
+	testJobSpecs, err := nc.CreateTestJobSpecs(job, buildNodeID)
 	if err != nil {
 		return fmt.Errorf("failed to create test job specs: %w", err)
 	}
