@@ -838,17 +838,26 @@ func watchJobProgress(jobID string, serviceURL string, historyMgr *history.Manag
 			if update.Status == types.StatusSucceeded {
 				fmt.Printf("\n✅ Job completed successfully\n")
 
-				// Display the published image details
-				if jobConfig != nil && jobConfig.ImageName != "" {
-					tags := jobConfig.ImageTags
-					if len(tags) == 0 {
-						tags = []string{jobID} // Default tag is job ID
+				// Fetch final status to get image metadata including sizes
+				c := client.NewClient(serviceURL)
+				if statusResp, err := c.GetStatus(jobID); err == nil && len(statusResp.Metrics.PublishedImages) > 0 {
+					fmt.Printf("\nPublished Images:\n")
+					for _, img := range statusResp.Metrics.PublishedImages {
+						fmt.Printf("  %s (%s)\n", img.Name, img.SizeHuman)
 					}
-					for _, tag := range tags {
-						if jobConfig.RegistryURL != "" {
-							fmt.Printf("Published: %s/%s:%s\n", jobConfig.RegistryURL, jobConfig.ImageName, tag)
-						} else {
-							fmt.Printf("Published: %s:%s\n", jobConfig.ImageName, tag)
+				} else {
+					// Fallback to existing behavior if metadata not available
+					if jobConfig != nil && jobConfig.ImageName != "" {
+						tags := jobConfig.ImageTags
+						if len(tags) == 0 {
+							tags = []string{jobID} // Default tag is job ID
+						}
+						for _, tag := range tags {
+							if jobConfig.RegistryURL != "" {
+								fmt.Printf("Published: %s/%s:%s\n", jobConfig.RegistryURL, jobConfig.ImageName, tag)
+							} else {
+								fmt.Printf("Published: %s:%s\n", jobConfig.ImageName, tag)
+							}
 						}
 					}
 				}

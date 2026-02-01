@@ -4,13 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	nomadapi "github.com/hashicorp/nomad/api"
 	"github.com/sirupsen/logrus"
-	
+
 	"nomad-mcp-builder/internal/config"
 	"nomad-mcp-builder/pkg/types"
 )
@@ -472,6 +473,17 @@ func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
 			// Publish completed, capture logs before they disappear
 			if err := nc.capturePhaseLogs(job, "publish"); err != nil {
 				nc.logger.WithError(err).Warn("Failed to capture publish logs")
+			}
+
+			// Parse published image metadata from logs
+			if len(job.Logs.Publish) > 0 && len(job.Metrics.PublishedImages) == 0 {
+				job.Metrics.PublishedImages = parsePublishedImagesFromLogs(job.Logs.Publish)
+				if len(job.Metrics.PublishedImages) > 0 {
+					nc.logger.WithFields(logrus.Fields{
+						"job_id":       job.ID,
+						"image_count":  len(job.Metrics.PublishedImages),
+					}).Info("Parsed published image metadata from logs")
+				}
 			}
 
 			job.Status = types.StatusSucceeded
@@ -1977,6 +1989,54 @@ func (nc *Client) CheckActiveBuildJobs() ([]string, error) {
 	}
 
 	return activeBuilds, nil
+}
+
+// parsePublishedImagesFromLogs extracts image metadata from publish logs
+func parsePublishedImagesFromLogs(logs []string) []types.PublishedImage {
+	var images []types.PublishedImage
+	for _, line := range logs {
+		// Look for lines like: [main/stdout] ===IMAGE_SIZE:registry/image:tag:12345===
+		// First, strip the log prefix if present
+		content := line
+		if idx := strings.Index(line, "] "); idx != -1 {
+			content = line[idx+2:]
+		}
+
+		if strings.HasPrefix(content, "===IMAGE_SIZE:") && strings.HasSuffix(content, "===") {
+			// Format: ===IMAGE_SIZE:registry/image:tag:12345===
+			inner := strings.TrimPrefix(content, "===IMAGE_SIZE:")
+			inner = strings.TrimSuffix(inner, "===")
+
+			// Find the last colon which separates the image name from the size
+			lastColon := strings.LastIndex(inner, ":")
+			if lastColon > 0 {
+				name := inner[:lastColon]
+				sizeStr := inner[lastColon+1:]
+				if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
+					images = append(images, types.PublishedImage{
+						Name:      name,
+						SizeBytes: size,
+						SizeHuman: formatBytes(size),
+					})
+				}
+			}
+		}
+	}
+	return images
+}
+
+// formatBytes converts bytes to human-readable format
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // getPhaseAllocations retrieves allocation details for a specific Nomad job

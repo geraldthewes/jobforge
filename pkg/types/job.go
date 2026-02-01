@@ -314,13 +314,16 @@ type JobMetrics struct {
 	PublishStart  *time.Time    `json:"publish_start,omitempty"`
 	PublishEnd    *time.Time    `json:"publish_end,omitempty"`
 	JobEnd        *time.Time    `json:"job_end,omitempty"`
-	
+
 	// Phase durations
 	BuildDuration   time.Duration `json:"build_duration"`
 	TestDuration    time.Duration `json:"test_duration"`
 	PublishDuration time.Duration `json:"publish_duration"`
 	TotalDuration   time.Duration `json:"total_duration"`
 	ResourceUsage   ResourceUsage `json:"resource_usage"`
+
+	// Published image metadata
+	PublishedImages []PublishedImage `json:"published_images,omitempty"`
 }
 
 // ResourceUsage tracks actual resource consumption
@@ -328,6 +331,13 @@ type ResourceUsage struct {
 	MaxCPU    float64 `json:"max_cpu"`    // CPU usage percentage
 	MaxMemory float64 `json:"max_memory"` // Memory usage in MB
 	DiskUsed  float64 `json:"disk_used"`  // Disk usage in MB
+}
+
+// PublishedImage contains metadata about a published Docker image
+type PublishedImage struct {
+	Name      string `json:"name"`       // Full image name (registry/repo:tag)
+	SizeBytes int64  `json:"size_bytes"` // Image size in bytes
+	SizeHuman string `json:"size_human"` // Human-readable size (e.g., "125 MB")
 }
 
 // JobHistory represents a historical job record

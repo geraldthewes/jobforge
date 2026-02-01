@@ -455,7 +455,14 @@ X-Webhook-Signature: sha256=<hmac-signature>  # If webhook_secret is configured
     "test_start": "2024-01-15T10:29:31Z",
     "test_end": "2024-01-15T10:30:15Z",
     "publish_start": "2024-01-15T10:30:16Z",
-    "publish_end": "2024-01-15T10:30:45Z"
+    "publish_end": "2024-01-15T10:30:45Z",
+    "published_images": [
+      {
+        "name": "registry.example.com:5000/myapp/myservice:v1.0.0",
+        "size_bytes": 125000000,
+        "size_human": "119.2 MB"
+      }
+    ]
   }
 }
 ```
@@ -914,8 +921,52 @@ Understanding the three-phase workflow:
 - Pulls image from temporary location
 - Re-tags with all specified `image_tags`
 - Pushes final images to `{registry_url}/{image_name}:{tag}`
+- **Captures image size metadata** for each published image
 - Cleans up temporary image
 - Uses resource limits from `resource_limits.publish` or global `resource_limits`
+
+### Published Image Metadata
+
+After the publish phase completes successfully, the job metrics include detailed information about each published image:
+
+```json
+{
+  "metrics": {
+    "published_images": [
+      {
+        "name": "registry.cluster:5000/myapp:v1.0.0",
+        "size_bytes": 125000000,
+        "size_human": "119.2 MB"
+      },
+      {
+        "name": "registry.cluster:5000/myapp:latest",
+        "size_bytes": 125000000,
+        "size_human": "119.2 MB"
+      }
+    ]
+  }
+}
+```
+
+**PublishedImage Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Full image name including registry and tag |
+| `size_bytes` | number | Image size in bytes |
+| `size_human` | string | Human-readable size (e.g., "125.3 MB", "1.2 GB") |
+
+**CLI Watch Mode Output:**
+
+When using `--watch`, the CLI displays image sizes upon successful completion:
+
+```
+✅ Job completed successfully
+
+Published Images:
+  registry.cluster:5000/myapp:v1.0.0 (119.2 MB)
+  registry.cluster:5000/myapp:latest (119.2 MB)
+```
 
 ## Common Patterns
 
