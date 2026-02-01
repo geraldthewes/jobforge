@@ -39,6 +39,9 @@ jobforge submit-job -global deploy/global.yaml build.yaml
 
 # Watch job progress in real-time
 jobforge submit-job build.yaml --watch
+
+# Skip unpushed commits warning (for CI/CD pipelines)
+jobforge submit-job build.yaml --no-git-check
 ```
 
 ### Check Job Status
@@ -131,6 +134,59 @@ jobforge prune-storage --all --all-nodes --force
 ## Configuration Reference
 
 For complete job configuration options (YAML schema, test configuration, resource limits, webhooks, etc.), see [JobSpec.md](JobSpec.md).
+
+## Unpushed Commits Safety Check
+
+When you run `jobforge submit-job` from within a git repository, JobForge automatically checks if you have unpushed commits. Since the build service clones from the remote repository, any local commits that haven't been pushed will not be included in the build.
+
+### How It Works
+
+1. JobForge detects if you're in a git repository
+2. It compares your local remote URL with the `repo_url` in your job config
+3. If they match, it checks for commits that exist locally but not on the remote
+4. If unpushed commits are found, you'll see a warning and be prompted for confirmation
+
+### Example Warning
+
+```
+WARNING: Unpushed commits detected!
+--------------------------------------------------
+  Local branch: feature/new-feature
+  Git ref in config: main
+  Unpushed commits: 3
+
+  Recent unpushed commits:
+    - abc1234 Add new feature
+    - def5678 Fix bug
+    - ghi9012 Update tests
+
+The remote build will use code from the remote repository,
+which does not include your local changes.
+
+Proceed anyway? Type 'yes' to continue:
+```
+
+### Skipping the Check
+
+Use `--no-git-check` to skip this safety check:
+
+```bash
+# Skip unpushed commits warning
+jobforge submit-job build.yaml --no-git-check
+```
+
+This is useful for:
+- CI/CD pipelines where the check is unnecessary
+- Building from a different repository than your current directory
+- Cases where you intentionally want to build older code
+
+### When the Check is Skipped Automatically
+
+The check is automatically skipped when:
+- You're not in a git repository
+- The local repository URL doesn't match the config's `repo_url`
+- No upstream branch is configured
+- The `repo_url` is empty in your config
 
 ## Tips for Coding Agents
 

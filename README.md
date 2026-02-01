@@ -10,6 +10,7 @@ The system enables users and coding agents to submit Docker image build jobs rem
 
 - **REST Protocol Support**: JSON-RPC over HTTP for agent communication
 - **CLI Tool**: User-friendly command-line interface with YAML configuration
+- **Unpushed Commits Detection**: Safety check warns before building if local commits aren't pushed
 - **Semantic Versioning**: Automatic patch incrementing with branch-aware tagging
 - **Three-Phase Build Pipeline**: Build → Test → Publish workflow orchestration
 - **Rootless Buildah Integration**: Secure, daemonless container building
@@ -68,6 +69,9 @@ jobforge submit-job build.yaml --image-tags "v1.0.0,latest"
 # Read config from stdin
 cat build.yaml | jobforge submit-job
 
+# Skip unpushed commits warning (for CI/CD pipelines)
+jobforge submit-job build.yaml --no-git-check
+
 # Query job status and logs
 jobforge get-status <job-id>
 jobforge get-logs [options] <job-id>
@@ -100,6 +104,7 @@ jobforge version-minor <ver>    # Set minor version (resets patch to 0)
 - **YAML Configuration**: Support for global config + per-build overrides
 - **Automatic Versioning**: Auto-increments patch version on each build
 - **Branch-Aware Tags**: Generates tags like `feature-auth-v0.1.5`
+- **Unpushed Commits Safety**: Warns before building if you have local commits that aren't pushed
 - **Simple Interface**: No need to manually construct JSON-RPC requests
 
 ### 2. Service Protocol Endpoint (Agent/Tool Integration)

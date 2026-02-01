@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"nomad-mcp-builder/pkg/client"
 	"nomad-mcp-builder/pkg/config"
 	"nomad-mcp-builder/pkg/consul"
+	"nomad-mcp-builder/pkg/git"
 	"nomad-mcp-builder/pkg/history"
 	"nomad-mcp-builder/pkg/types"
 
@@ -77,6 +79,11 @@ SUBMIT-JOB OPTIONS:
                             When used alone: Records submission only (no final status)
                             With --watch: Records complete build with logs and final status
                             Deploy directory configurable via 'deploy_dir' in YAML (default: ./deploy)
+
+  --no-git-check            Skip the unpushed commits safety check
+                            By default, if running from a git repo that matches the
+                            configured repo_url, warns if there are local commits
+                            that haven't been pushed to the remote
 
 GET-LOGS OPTIONS:
   --phase <phase>           Get logs for specific phase only (build, test, or publish)
@@ -306,6 +313,7 @@ func handleSubmitJob(c *client.Client, args []string) error {
 	var configData string
 	var watch bool
 	var enableHistory bool
+	var noGitCheck bool
 
 	i := 0
 	for i < len(args) {
@@ -315,6 +323,9 @@ func handleSubmitJob(c *client.Client, args []string) error {
 			i++
 		} else if arg == "--history" {
 			enableHistory = true
+			i++
+		} else if arg == "--no-git-check" {
+			noGitCheck = true
 			i++
 		} else if arg == "--image-tags" {
 			if i+1 >= len(args) {
@@ -412,6 +423,13 @@ func handleSubmitJob(c *client.Client, args []string) error {
 		}
 	}
 
+	// Check for unpushed commits unless --no-git-check is specified
+	if !noGitCheck && jobConfig.RepoURL != "" {
+		if err := checkAndWarnUnpushedCommits(jobConfig); err != nil {
+			return err
+		}
+	}
+
 	// Submit job
 	submissionTime := time.Now()
 	response, err := c.SubmitJob(jobConfig)
@@ -501,6 +519,72 @@ func parseConfigData(data string) (*types.JobConfig, error) {
 	}
 
 	return &jobConfig, nil
+}
+
+// checkAndWarnUnpushedCommits checks for unpushed commits and prompts the user for confirmation.
+// Returns an error if the user aborts, nil if they proceed or no warning is needed.
+func checkAndWarnUnpushedCommits(jobConfig *types.JobConfig) error {
+	// Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		// Can't determine directory, skip check
+		return nil
+	}
+
+	// Check for unpushed commits
+	status, err := git.CheckUnpushedCommits(cwd, jobConfig.GitRef, jobConfig.RepoURL)
+	if err != nil {
+		// Error checking, skip (don't block the build for git errors)
+		return nil
+	}
+
+	// Skip if not a git repo or different repo
+	if !status.IsGitRepo || !status.RepoMatches {
+		return nil
+	}
+
+	// No unpushed commits - proceed
+	if !status.HasUnpushed {
+		return nil
+	}
+
+	// Display warning
+	fmt.Println()
+	fmt.Println("WARNING: Unpushed commits detected!")
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Printf("  Local branch: %s\n", status.LocalBranch)
+	if status.ConfigGitRef != "" {
+		fmt.Printf("  Git ref in config: %s\n", status.ConfigGitRef)
+	}
+	fmt.Printf("  Unpushed commits: %d\n", status.UnpushedCount)
+
+	if len(status.CommitSummary) > 0 {
+		fmt.Println()
+		fmt.Println("  Recent unpushed commits:")
+		for _, summary := range status.CommitSummary {
+			fmt.Printf("    - %s\n", summary)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("The remote build will use code from the remote repository,")
+	fmt.Println("which does not include your local changes.")
+	fmt.Println()
+	fmt.Print("Proceed anyway? Type 'yes' to continue: ")
+
+	// Read user confirmation
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	response = strings.TrimSpace(strings.ToLower(response))
+	if response != "yes" {
+		return fmt.Errorf("aborted: unpushed commits detected (use --no-git-check to skip this warning)")
+	}
+
+	return nil
 }
 
 // displayAllocationWarnings prints allocation warnings to the console
