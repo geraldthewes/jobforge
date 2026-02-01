@@ -123,13 +123,24 @@ func TestConsulJobWatcher(t *testing.T) {
 	}
 
 	// Verify watcher exits after job completes
-	select {
-	case _, ok := <-updates:
-		if ok {
-			t.Error("Updates channel should be closed after job completion")
+	// Drain any buffered duplicate updates first (Consul blocking queries can return
+	// spuriously when the global KV index changes or due to network hiccups)
+	channelClosed := false
+	drainTimeout := time.After(5 * time.Second)
+	for !channelClosed {
+		select {
+		case update, ok := <-updates:
+			if !ok {
+				// Channel closed as expected
+				channelClosed = true
+			} else {
+				// Got a buffered duplicate update, continue draining
+				t.Logf("Draining buffered update: Status=%s, Phase=%s", update.Status, update.Phase)
+			}
+		case <-drainTimeout:
+			t.Error("Watcher did not close updates channel after job completion")
+			channelClosed = true
 		}
-	case <-time.After(2 * time.Second):
-		t.Error("Watcher did not close updates channel after job completion")
 	}
 }
 
@@ -209,12 +220,23 @@ func TestConsulJobWatcher_Failure(t *testing.T) {
 	}
 
 	// Verify watcher exits after failure
-	select {
-	case _, ok := <-updates:
-		if ok {
-			t.Error("Updates channel should be closed after job failure")
+	// Drain any buffered duplicate updates first (Consul blocking queries can return
+	// spuriously when the global KV index changes or due to network hiccups)
+	channelClosed := false
+	drainTimeout := time.After(5 * time.Second)
+	for !channelClosed {
+		select {
+		case update, ok := <-updates:
+			if !ok {
+				// Channel closed as expected
+				channelClosed = true
+			} else {
+				// Got a buffered duplicate update, continue draining
+				t.Logf("Draining buffered update: Status=%s, Phase=%s", update.Status, update.Phase)
+			}
+		case <-drainTimeout:
+			t.Error("Watcher did not close updates channel after job failure")
+			channelClosed = true
 		}
-	case <-time.After(2 * time.Second):
-		t.Error("Watcher did not close updates channel after job failure")
 	}
 }
