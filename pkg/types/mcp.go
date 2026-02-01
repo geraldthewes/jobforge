@@ -129,6 +129,7 @@ type ReportTestResultResponse struct {
 
 // PruneStorageRequest represents a request to prune buildah storage cache
 type PruneStorageRequest struct {
+	NodeName string `json:"node_name,omitempty"` // Optional: target specific node by name
 	Project  string `json:"project,omitempty"`   // Optional: prune only specific project's cache
 	All      bool   `json:"all,omitempty"`       // Aggressive prune: remove all images and caches
 	AllNodes bool   `json:"all_nodes,omitempty"` // Prune on all Nomad nodes (sysbatch)

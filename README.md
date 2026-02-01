@@ -87,6 +87,8 @@ jobforge list-active-jobs --owner <owner>  # List active jobs
 jobforge prune-storage --dry-run  # Preview what would be cleaned
 jobforge prune-storage            # Conservative prune (dangling images, old caches)
 jobforge prune-storage --all --force  # Aggressive prune (all cached images)
+jobforge prune-storage gpu005 --dry-run  # Target a specific node by name
+jobforge prune-storage --all-nodes --dry-run  # Prune on all nodes (sysbatch)
 
 # Version management
 jobforge version-info           # Show current version and branch

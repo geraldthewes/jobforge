@@ -1449,6 +1449,16 @@ func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, prun
 		"echo '=== Prune Completed ==='",
 	)
 
+	// Build constraints for node targeting
+	var constraints []*nomadapi.Constraint
+	if req.NodeName != "" {
+		constraints = append(constraints, &nomadapi.Constraint{
+			LTarget: "${node.unique.name}",
+			RTarget: req.NodeName,
+			Operand: "=",
+		})
+	}
+
 	jobSpec := &nomadapi.Job{
 		ID:          &pruneJobID,
 		Name:        &pruneJobID,
@@ -1464,8 +1474,9 @@ func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, prun
 		},
 		TaskGroups: []*nomadapi.TaskGroup{
 			{
-				Name:  stringPtr("prune"),
-				Count: intPtr(1),
+				Name:        stringPtr("prune"),
+				Count:       intPtr(1),
+				Constraints: constraints,
 				RestartPolicy: &nomadapi.RestartPolicy{
 					Attempts: intPtr(0), // No restart for prune jobs
 				},
@@ -1507,6 +1518,11 @@ func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, prun
 	// Add project metadata if specified
 	if req.Project != "" {
 		jobSpec.Meta["project"] = req.Project
+	}
+
+	// Add node_name metadata if specified
+	if req.NodeName != "" {
+		jobSpec.Meta["node_name"] = req.NodeName
 	}
 
 	return jobSpec

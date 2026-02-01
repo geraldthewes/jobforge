@@ -82,6 +82,7 @@ GET-LOGS OPTIONS:
                             If not specified, returns logs for all phases
 
 PRUNE-STORAGE OPTIONS:
+  <node-name>               Target a specific node by name (e.g., gpu005.cluster)
   --dry-run                 Preview what would be cleaned without deleting
   --project <name>          Only prune cache for a specific project/image
   --all                     Aggressive prune: remove all images and caches
@@ -1484,6 +1485,7 @@ func formatDuration(d time.Duration) string {
 
 // handlePruneStorage handles the prune-storage command
 func handlePruneStorage(c *client.Client, args []string) error {
+	var nodeName string
 	var dryRun bool
 	var project string
 	var all bool
@@ -1491,7 +1493,7 @@ func handlePruneStorage(c *client.Client, args []string) error {
 	var force bool
 	var watch bool
 
-	// Parse flags
+	// Parse flags and positional argument (node name)
 	i := 0
 	for i < len(args) {
 		arg := args[i]
@@ -1522,8 +1524,15 @@ func handlePruneStorage(c *client.Client, args []string) error {
 		} else if strings.HasPrefix(arg, "-") {
 			return fmt.Errorf("unknown flag: %s", arg)
 		} else {
+			// Positional argument: node name
+			nodeName = arg
 			i++
 		}
+	}
+
+	// Validate: --all-nodes and node name are mutually exclusive
+	if allNodes && nodeName != "" {
+		return fmt.Errorf("--all-nodes and node name (%s) are mutually exclusive", nodeName)
 	}
 
 	// Safety confirmation for aggressive prune without --force
@@ -1541,6 +1550,7 @@ func handlePruneStorage(c *client.Client, args []string) error {
 
 	// Build request
 	req := &types.PruneStorageRequest{
+		NodeName: nodeName,
 		Project:  project,
 		All:      all,
 		AllNodes: allNodes,
