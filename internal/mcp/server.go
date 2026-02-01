@@ -70,6 +70,23 @@ func (s *Server) lockJob(jobID string) func() {
 	return mutex.Unlock
 }
 
+// extractPythonTestOutput extracts python-executor output from logs.
+// This output is identified by the "=== Python Test Output" marker.
+// Returns the extracted lines, or nil if no python output is found.
+func extractPythonTestOutput(logs []string) []string {
+	var pythonOutput []string
+	inPythonSection := false
+	for _, line := range logs {
+		if strings.HasPrefix(line, "=== Python Test Output") {
+			inPythonSection = true
+		}
+		if inPythonSection {
+			pythonOutput = append(pythonOutput, line)
+		}
+	}
+	return pythonOutput
+}
+
 // NewServer creates a new MCP server
 func NewServer(cfg *config.Config, nomadClient *nomad.Client, storage *storage.ConsulStorage, logger *logrus.Logger) *Server {
 	return &Server{
@@ -386,6 +403,10 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// Preserve any python-executor output that was appended via ReportTestResult
+	// before fetching fresh logs from Nomad (which would overwrite them)
+	pythonOutput := extractPythonTestOutput(job.Logs.Test)
+
 	// Get latest logs from Nomad
 	logs, err := s.nomadClient.GetJobLogs(job)
 	if err != nil {
@@ -393,7 +414,12 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		// Return cached logs
 		logs = job.Logs
 	} else {
-		// Update job with latest logs
+		// Re-append python output if any was preserved
+		if len(pythonOutput) > 0 {
+			logs.Test = append(logs.Test, pythonOutput...)
+		}
+
+		// Update job with merged logs
 		job.Logs = logs
 		if err := s.storage.UpdateJob(job); err != nil {
 			s.logger.WithError(err).Warn("Failed to update job logs in storage")
