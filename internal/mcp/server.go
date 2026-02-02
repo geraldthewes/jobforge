@@ -890,28 +890,41 @@ func (s *Server) backgroundJobMonitor(ctx context.Context) {
 }
 
 func (s *Server) backgroundCleanup(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-	
+	historyTicker := time.NewTicker(1 * time.Hour)
+	staleLockTicker := time.NewTicker(15 * time.Minute)
+	defer historyTicker.Stop()
+	defer staleLockTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-historyTicker.C:
 			// Get configurable retention period, default to 7 days
 			retentionDays := s.config.Build.LogRetentionDays
 			if retentionDays <= 0 {
 				retentionDays = 7 // Default to 7 days
 			}
-			
+
 			// Only cleanup old job history automatically - normal cleanup should be done explicitly
 			if err := s.storage.CleanupOldHistory(time.Duration(retentionDays) * 24 * time.Hour); err != nil {
 				s.logger.WithError(err).Warn("Failed to cleanup old job history")
 			}
-			
+
 			// Cleanup zombie jobs (jobs running longer than 24 hours without updates)
 			if _, err := s.cleanupZombieJobs(); err != nil {
 				s.logger.WithError(err).Warn("Failed to cleanup zombie jobs")
+			}
+		case <-staleLockTicker.C:
+			// Cleanup stale locks (orphaned locks with no session or completed jobs)
+			cleanedKeys, err := s.storage.CleanupStaleLocks()
+			if err != nil {
+				s.logger.WithError(err).Warn("Failed to cleanup stale locks")
+			} else if len(cleanedKeys) > 0 {
+				s.logger.WithFields(map[string]interface{}{
+					"cleaned_count": len(cleanedKeys),
+					"cleaned_keys":  cleanedKeys,
+				}).Info("Automatic stale lock cleanup completed")
 			}
 		}
 	}

@@ -325,34 +325,99 @@ func (cs *ConsulStorage) ReleaseLock(lockKey, sessionID string) error {
 		"lock_key":   lockKey,
 		"session_id": sessionID,
 	}).Debug("Releasing lock")
-	
-	// First, release the key from the session
+
 	fullKey := fmt.Sprintf("%s/locks/%s", cs.keyPrefix, lockKey)
+
+	// First, check if the lock exists and verify ownership
+	existingPair, _, err := cs.client.KV().Get(fullKey, nil)
+	if err != nil {
+		cs.logger.WithError(err).WithFields(logrus.Fields{
+			"lock_key":   lockKey,
+			"session_id": sessionID,
+		}).Error("Failed to get lock for verification - not destroying session to prevent orphan")
+		return fmt.Errorf("failed to verify lock ownership: %w", err)
+	}
+
+	// If lock doesn't exist, just destroy the session
+	if existingPair == nil {
+		cs.logger.WithFields(logrus.Fields{
+			"lock_key":   lockKey,
+			"session_id": sessionID,
+		}).Warn("Lock key not found, destroying session only")
+		_, err = cs.client.Session().Destroy(sessionID, nil)
+		if err != nil {
+			cs.logger.WithError(err).Warn("Failed to destroy session")
+			return fmt.Errorf("failed to destroy session: %w", err)
+		}
+		return nil
+	}
+
+	// If lock has no session (orphaned), delete it directly
+	if existingPair.Session == "" {
+		cs.logger.WithFields(logrus.Fields{
+			"lock_key":   lockKey,
+			"session_id": sessionID,
+		}).Warn("Lock has no session (orphaned), deleting key directly")
+		_, err = cs.client.KV().Delete(fullKey, nil)
+		if err != nil {
+			cs.logger.WithError(err).Warn("Failed to delete orphaned lock key")
+			return fmt.Errorf("failed to delete orphaned lock: %w", err)
+		}
+		// Destroy our session as well
+		cs.client.Session().Destroy(sessionID, nil)
+		return nil
+	}
+
+	// Verify this session owns the lock
+	if existingPair.Session != sessionID {
+		cs.logger.WithFields(logrus.Fields{
+			"lock_key":        lockKey,
+			"session_id":      sessionID,
+			"actual_session":  existingPair.Session,
+		}).Warn("Lock is held by a different session")
+		// Destroy our session since we don't own the lock
+		cs.client.Session().Destroy(sessionID, nil)
+		return fmt.Errorf("lock is held by a different session")
+	}
+
+	// Release the key from the session
 	pair := &consulapi.KVPair{
 		Key:     fullKey,
 		Session: sessionID,
 	}
-	
+
 	// Use the Release method which is atomic
 	released, _, err := cs.client.KV().Release(pair, nil)
 	if err != nil {
-		cs.logger.WithError(err).Warn("Failed to release lock key")
-	} else if !released {
-		cs.logger.Warn("Lock key was not held by this session")
+		// On network error, don't destroy session - let TTL handle cleanup
+		// This prevents orphaned KV entries
+		cs.logger.WithError(err).WithFields(logrus.Fields{
+			"lock_key":   lockKey,
+			"session_id": sessionID,
+		}).Error("Failed to release lock key - not destroying session to prevent orphan")
+		return fmt.Errorf("failed to release lock: %w", err)
 	}
-	
-	// Always destroy the session to clean up
+
+	if !released {
+		cs.logger.WithFields(logrus.Fields{
+			"lock_key":   lockKey,
+			"session_id": sessionID,
+		}).Warn("Lock key was not released (may have been released by TTL)")
+	}
+
+	// Only destroy session after successful KV release
 	_, err = cs.client.Session().Destroy(sessionID, nil)
 	if err != nil {
-		cs.logger.WithError(err).Warn("Failed to destroy session")
-		return fmt.Errorf("failed to destroy session: %w", err)
+		cs.logger.WithError(err).Warn("Failed to destroy session after release")
+		// The lock is already released, so this is not critical
+		// The session will expire via TTL
 	}
-	
+
 	cs.logger.WithFields(logrus.Fields{
 		"lock_key":   lockKey,
 		"session_id": sessionID,
 	}).Info("Lock released successfully")
-	
+
 	return nil
 }
 
@@ -586,21 +651,35 @@ func (cs *ConsulStorage) ForceReleaseLock(lockKey string) error {
 		return fmt.Errorf("lock not found: %s", lockKey)
 	}
 
+	var sessionDestroyErr error
 	// Try to destroy the session if present
 	if pair.Session != "" {
-		_, err = cs.client.Session().Destroy(pair.Session, nil)
-		if err != nil {
-			cs.logger.WithError(err).WithField("session_id", pair.Session).Warn("Failed to destroy session during force unlock")
+		_, sessionDestroyErr = cs.client.Session().Destroy(pair.Session, nil)
+		if sessionDestroyErr != nil {
+			cs.logger.WithError(sessionDestroyErr).WithFields(logrus.Fields{
+				"session_id": pair.Session,
+				"lock_key":   lockKey,
+			}).Warn("Failed to destroy session during force unlock - continuing with key deletion")
+		} else {
+			cs.logger.WithFields(logrus.Fields{
+				"session_id": pair.Session,
+				"lock_key":   lockKey,
+			}).Debug("Session destroyed during force unlock")
 		}
+	} else {
+		cs.logger.WithField("lock_key", lockKey).Debug("Lock has no session (orphaned), deleting key only")
 	}
 
-	// Delete the lock key
+	// Always delete the lock key, even if session destroy failed
 	_, err = cs.client.KV().Delete(fullKey, nil)
 	if err != nil {
 		return fmt.Errorf("failed to delete lock key: %w", err)
 	}
 
-	cs.logger.WithField("lock_key", lockKey).Info("Lock forcefully released")
+	cs.logger.WithFields(logrus.Fields{
+		"lock_key":            lockKey,
+		"session_destroy_err": sessionDestroyErr != nil,
+	}).Info("Lock forcefully released")
 	return nil
 }
 
