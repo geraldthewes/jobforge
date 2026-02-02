@@ -419,3 +419,196 @@ func TestGPUCheckTaskIsExported(t *testing.T) {
 func hasLifecycleHook(task *nomadapi.Task, hook string) bool {
 	return task.Lifecycle != nil && task.Lifecycle.Hook == hook
 }
+
+// TestGPUComputeCapabilityConstraint tests that GPU compute capability constraint is added when specified
+func TestGPUComputeCapabilityConstraint(t *testing.T) {
+	client := createTestClient(t)
+
+	jobConfig := types.JobConfig{
+		Owner:          "test-user",
+		RepoURL:        "https://github.com/test/repo.git",
+		GitRef:         "main",
+		DockerfilePath: "Dockerfile",
+		ImageName:      "test-image",
+		ImageTags:      []string{"latest"},
+		RegistryURL:    "registry.local:5000",
+		Test: &types.TestConfig{
+			EntryPoint:           true,
+			GPURequired:          true,
+			GPUComputeCapability: "7.5", // Turing or newer
+		},
+	}
+
+	job := &types.Job{
+		ID:     "test-job-compute-cap",
+		Config: jobConfig,
+	}
+
+	testJobs, err := client.CreateTestJobSpecs(job, "")
+	if err != nil {
+		t.Fatalf("Failed to create test job specs: %v", err)
+	}
+
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
+	}
+
+	// Check constraints on the job
+	testJobSpec := testJobs[0]
+	constraints := testJobSpec.TaskGroups[0].Constraints
+
+	// Should have both gpu-capable and gpu_compute_capability constraints
+	var hasGPUCapable, hasComputeCapability bool
+	var computeCapValue, computeCapOperand string
+
+	for _, c := range constraints {
+		if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" && c.Operand == "=" {
+			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu_compute_capability}" {
+			hasComputeCapability = true
+			computeCapValue = c.RTarget
+			computeCapOperand = c.Operand
+		}
+	}
+
+	if !hasGPUCapable {
+		t.Error("Expected gpu-capable constraint to be present")
+	}
+
+	if !hasComputeCapability {
+		t.Error("Expected gpu_compute_capability constraint to be present")
+	}
+
+	if computeCapValue != "7.5" {
+		t.Errorf("Expected gpu_compute_capability value '7.5', got '%s'", computeCapValue)
+	}
+
+	if computeCapOperand != ">=" {
+		t.Errorf("Expected gpu_compute_capability operand '>=', got '%s'", computeCapOperand)
+	}
+}
+
+// TestGPUComputeCapabilityNotAddedWhenEmpty tests that no constraint is added when GPUComputeCapability is empty
+func TestGPUComputeCapabilityNotAddedWhenEmpty(t *testing.T) {
+	client := createTestClient(t)
+
+	jobConfig := types.JobConfig{
+		Owner:          "test-user",
+		RepoURL:        "https://github.com/test/repo.git",
+		GitRef:         "main",
+		DockerfilePath: "Dockerfile",
+		ImageName:      "test-image",
+		ImageTags:      []string{"latest"},
+		RegistryURL:    "registry.local:5000",
+		Test: &types.TestConfig{
+			EntryPoint:           true,
+			GPURequired:          true,
+			GPUComputeCapability: "", // Empty - should not add constraint
+		},
+	}
+
+	job := &types.Job{
+		ID:     "test-job-no-compute-cap",
+		Config: jobConfig,
+	}
+
+	testJobs, err := client.CreateTestJobSpecs(job, "")
+	if err != nil {
+		t.Fatalf("Failed to create test job specs: %v", err)
+	}
+
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
+	}
+
+	// Check constraints on the job
+	testJobSpec := testJobs[0]
+	constraints := testJobSpec.TaskGroups[0].Constraints
+
+	// Should have gpu-capable but NOT gpu_compute_capability constraint
+	var hasGPUCapable, hasComputeCapability bool
+
+	for _, c := range constraints {
+		if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" && c.Operand == "=" {
+			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu_compute_capability}" {
+			hasComputeCapability = true
+		}
+	}
+
+	if !hasGPUCapable {
+		t.Error("Expected gpu-capable constraint to be present")
+	}
+
+	if hasComputeCapability {
+		t.Error("Expected gpu_compute_capability constraint NOT to be present when GPUComputeCapability is empty")
+	}
+}
+
+// TestGPUComputeCapabilityWithoutGPURequired tests that compute capability constraint works independently
+func TestGPUComputeCapabilityWithoutGPURequired(t *testing.T) {
+	client := createTestClient(t)
+
+	// Test case where only compute capability is set (not GPURequired)
+	// This could be useful for jobs that need a specific architecture but don't need the nvidia runtime
+	jobConfig := types.JobConfig{
+		Owner:          "test-user",
+		RepoURL:        "https://github.com/test/repo.git",
+		GitRef:         "main",
+		DockerfilePath: "Dockerfile",
+		ImageName:      "test-image",
+		ImageTags:      []string{"latest"},
+		RegistryURL:    "registry.local:5000",
+		Test: &types.TestConfig{
+			EntryPoint:           true,
+			GPURequired:          false, // Not requiring GPU runtime
+			GPUComputeCapability: "8.6", // But specifying compute capability
+		},
+	}
+
+	job := &types.Job{
+		ID:     "test-job-compute-cap-only",
+		Config: jobConfig,
+	}
+
+	testJobs, err := client.CreateTestJobSpecs(job, "")
+	if err != nil {
+		t.Fatalf("Failed to create test job specs: %v", err)
+	}
+
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
+	}
+
+	// Check constraints on the job
+	testJobSpec := testJobs[0]
+	constraints := testJobSpec.TaskGroups[0].Constraints
+
+	// Should have gpu_compute_capability but NOT gpu-capable constraint
+	var hasGPUCapable, hasComputeCapability bool
+	var computeCapValue string
+
+	for _, c := range constraints {
+		if c.LTarget == "${meta.gpu-capable}" {
+			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu_compute_capability}" {
+			hasComputeCapability = true
+			computeCapValue = c.RTarget
+		}
+	}
+
+	if hasGPUCapable {
+		t.Error("Expected gpu-capable constraint NOT to be present when GPURequired is false")
+	}
+
+	if !hasComputeCapability {
+		t.Error("Expected gpu_compute_capability constraint to be present")
+	}
+
+	if computeCapValue != "8.6" {
+		t.Errorf("Expected gpu_compute_capability value '8.6', got '%s'", computeCapValue)
+	}
+}

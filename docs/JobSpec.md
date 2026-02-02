@@ -78,6 +78,7 @@ For GPU-accelerated workloads or specific node targeting, additional test config
 |-------|------|---------|-------------|
 | `test.gpu_required` | boolean | `false` | Enable NVIDIA GPU runtime and automatically constrain to GPU-capable nodes |
 | `test.gpu_count` | integer | `0` | **Deprecated** - GPU allocation is controlled via `NVIDIA_VISIBLE_DEVICES` env var |
+| `test.gpu_compute_capability` | string | - | Minimum GPU compute capability (e.g., "7.5" for Turing+). Requires nodes to have `meta.gpu_compute_capability` set. |
 | `test.constraints` | array[Constraint] | `[]` | Custom Nomad node constraints for test job placement |
 
 **Constraint Type**:
@@ -98,6 +99,29 @@ Each constraint specifies a Nomad node attribute to match:
   - `NVIDIA_VISIBLE_DEVICES` defaults to `"all"` when `gpu_required: true`
   - You can override by setting `NVIDIA_VISIBLE_DEVICES` in `test.env` (e.g., `"0"`, `"0,1"`)
   - This approach works without requiring Nomad NVIDIA device plugins
+
+**GPU Compute Capability**:
+
+The `gpu_compute_capability` field allows specifying a minimum GPU architecture requirement. This is useful when your workload requires specific CUDA features only available on newer GPUs.
+
+| Compute Capability | Architecture | Example GPUs |
+|-------------------|--------------|--------------|
+| 6.1 | Pascal | GTX 1080Ti, GTX 1070 |
+| 7.0 | Volta | Tesla V100 |
+| 7.5 | Turing | RTX 2080, RTX 2070 |
+| 8.0 | Ampere | A100 |
+| 8.6 | Ampere | RTX 3080, RTX 3090 |
+| 8.9 | Ada Lovelace | RTX 4090, RTX 4080 |
+
+**Node Setup**: Nomad nodes with GPUs must have `meta.gpu_compute_capability` set in their client configuration:
+```hcl
+client {
+  meta {
+    "gpu-capable" = "true"
+    "gpu_compute_capability" = "7.5"  # For RTX 2080
+  }
+}
+```
 
 **GPU Availability Check**:
 
@@ -217,6 +241,14 @@ test:
       operand: "="
   env:
     TEST_REGION: "us-west-2"
+
+# GPU test requiring Turing or newer architecture (RTX 20xx+)
+test:
+  entry_point: true
+  gpu_required: true
+  gpu_compute_capability: "7.5"  # Requires Turing (RTX 2080) or newer
+  env:
+    CUDA_VISIBLE_DEVICES: "0"
 ```
 
 #### External Python Tests Configuration

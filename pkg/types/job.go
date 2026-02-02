@@ -37,9 +37,10 @@ type TestConfig struct {
 	VaultPolicies  []string               `json:"vault_policies,omitempty" yaml:"vault_policies,omitempty"` // Vault policies required to access secrets
 	ResourceLimits *PhaseResourceLimits   `json:"resource_limits,omitempty" yaml:"resource_limits,omitempty"` // Test phase resource limits
 	Timeout        *time.Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`               // Test phase timeout
-	GPURequired    bool                   `json:"gpu_required,omitempty" yaml:"gpu_required,omitempty"`     // Enable GPU runtime (nvidia) for test containers
-	GPUCount       int                    `json:"gpu_count,omitempty" yaml:"gpu_count,omitempty"`           // Number of GPUs to allocate (0 = all available)
-	Constraints    []Constraint           `json:"constraints,omitempty" yaml:"constraints,omitempty"`       // Custom node constraints for test job placement
+	GPURequired          bool                   `json:"gpu_required,omitempty" yaml:"gpu_required,omitempty"`           // Enable GPU runtime (nvidia) for test containers
+	GPUCount             int                    `json:"gpu_count,omitempty" yaml:"gpu_count,omitempty"`                 // Number of GPUs to allocate (0 = all available)
+	GPUComputeCapability string                 `json:"gpu_compute_capability,omitempty" yaml:"gpu_compute_capability,omitempty"` // Minimum GPU compute capability (e.g., "7.5" for Turing+)
+	Constraints          []Constraint           `json:"constraints,omitempty" yaml:"constraints,omitempty"`             // Custom node constraints for test job placement
 
 	// External Python test configuration (runs via python-executor on CLI machine)
 	PythonCwd          string `json:"python_cwd,omitempty" yaml:"python_cwd,omitempty"`                     // Working directory for python tests (relative to repo root)

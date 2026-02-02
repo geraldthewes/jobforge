@@ -1193,6 +1193,15 @@ func (nc *Client) buildTestConstraints(job *types.Job, buildNodeID string) []*no
 		})
 	}
 
+	// Add GPU compute capability constraint if specified (e.g., "7.5" for Turing or newer)
+	if job.Config.Test != nil && job.Config.Test.GPUComputeCapability != "" {
+		constraints = append(constraints, &nomadapi.Constraint{
+			LTarget: "${meta.gpu_compute_capability}",
+			RTarget: job.Config.Test.GPUComputeCapability,
+			Operand: ">=",
+		})
+	}
+
 	// Add custom constraints from test configuration
 	if job.Config.Test != nil && len(job.Config.Test.Constraints) > 0 {
 		for _, c := range job.Config.Test.Constraints {
