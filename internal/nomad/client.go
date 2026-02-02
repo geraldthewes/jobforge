@@ -2006,6 +2006,60 @@ func (nc *Client) CheckActiveBuildJobs() ([]string, error) {
 	return activeBuilds, nil
 }
 
+// RunCleanupBuildahCache submits a cleanup buildah cache job and returns the job ID
+func (nc *Client) RunCleanupBuildahCache(req *types.CleanupBuildahCacheRequest) (string, error) {
+	// Generate a unique job ID for the cleanup operation
+	cleanupJobID := fmt.Sprintf("cleanup-cache-%s", uuid.New().String()[:8])
+
+	// Create the job specification
+	jobSpec := nc.createCleanupBuildahCacheJobSpec(req, cleanupJobID)
+
+	// Log the job specification for debugging
+	nc.logJobSpec(jobSpec, "cleanup-buildah-cache")
+
+	// Submit the job to Nomad
+	registerOpts := &nomadapi.RegisterOptions{
+		PolicyOverride: false,
+		PreserveCounts: false,
+	}
+	writeOpts := &nomadapi.WriteOptions{
+		Region:    nc.config.Nomad.Region,
+		Namespace: nc.config.Nomad.Namespace,
+	}
+
+	evalID, _, err := nc.client.Jobs().RegisterOpts(jobSpec, registerOpts, writeOpts)
+	if err != nil {
+		return "", fmt.Errorf("failed to submit cleanup buildah cache job: %w", err)
+	}
+
+	nc.logger.WithFields(logrus.Fields{
+		"cleanup_job_id": cleanupJobID,
+		"eval_id":        evalID,
+		"dry_run":        req.DryRun,
+		"full":           req.Full,
+		"all_nodes":      req.AllNodes,
+		"node_name":      req.NodeName,
+	}).Info("Cleanup buildah cache job submitted to Nomad")
+
+	return cleanupJobID, nil
+}
+
+// GetCleanupBuildahCacheJobStatus returns the status and logs for a cleanup cache job
+func (nc *Client) GetCleanupBuildahCacheJobStatus(cleanupJobID string) (string, []string, error) {
+	status, err := nc.getJobStatus(cleanupJobID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get cleanup job status: %w", err)
+	}
+
+	logs, err := nc.getJobLogs(cleanupJobID)
+	if err != nil {
+		nc.logger.WithError(err).Warn("Failed to get cleanup job logs")
+		logs = []string{}
+	}
+
+	return status, logs, nil
+}
+
 // parsePublishedImagesFromLogs extracts image metadata from publish logs
 func parsePublishedImagesFromLogs(logs []string) []types.PublishedImage {
 	var images []types.PublishedImage

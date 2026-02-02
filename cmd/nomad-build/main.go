@@ -51,6 +51,7 @@ COMMANDS:
 
   Storage Management:
     prune-storage [options]           Prune buildah storage cache to free disk space
+    cleanup-buildah-cache [options]   Fix corrupted buildah storage (for "identifier is not a container" errors)
 
   Service Management:
     health                            Check service health status
@@ -100,6 +101,14 @@ PRUNE-STORAGE OPTIONS:
   --all-nodes               Prune on all Nomad nodes (uses sysbatch)
   --force                   Skip safety checks (required with --all if builds active)
   -w, --watch               Watch prune job progress
+
+CLEANUP-BUILDAH-CACHE OPTIONS:
+  <node-name>               Target a specific node by name (e.g., worker-1)
+  --dry-run                 Preview what would be cleaned without executing
+  --full                    Full reset: clear all storage (when standard cleanup fails)
+  --all-nodes               Cleanup on all Nomad nodes (uses sysbatch)
+  --force                   Skip safety checks (required with --full if builds active)
+  -w, --watch               Watch cleanup job progress
 
 YAML CONFIGURATION:
   Global config (deploy/global.yaml) - Shared settings:
@@ -299,6 +308,8 @@ func run(args []string) error {
 		return handleListActiveJobs(c, commandArgs)
 	case "prune-storage":
 		return handlePruneStorage(c, commandArgs)
+	case "cleanup-buildah-cache":
+		return handleCleanupBuildahCache(c, commandArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
@@ -1836,6 +1847,159 @@ func watchPruneJob(c *client.Client, pruneJobID string) error {
 
 		case <-timeout:
 			return fmt.Errorf("timed out waiting for prune job to complete")
+		}
+	}
+}
+
+// handleCleanupBuildahCache handles the cleanup-buildah-cache command
+func handleCleanupBuildahCache(c *client.Client, args []string) error {
+	var nodeName string
+	var dryRun bool
+	var full bool
+	var allNodes bool
+	var force bool
+	var watch bool
+
+	// Parse flags and positional argument (node name)
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--dry-run" {
+			dryRun = true
+			i++
+		} else if arg == "--full" {
+			full = true
+			i++
+		} else if arg == "--all-nodes" {
+			allNodes = true
+			i++
+		} else if arg == "--force" || arg == "-f" {
+			force = true
+			i++
+		} else if arg == "--watch" || arg == "-w" {
+			watch = true
+			i++
+		} else if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown flag: %s", arg)
+		} else {
+			// Positional argument: node name
+			nodeName = arg
+			i++
+		}
+	}
+
+	// Validate: --all-nodes and node name are mutually exclusive
+	if allNodes && nodeName != "" {
+		return fmt.Errorf("--all-nodes and node name (%s) are mutually exclusive", nodeName)
+	}
+
+	// Safety confirmation for full reset without --force
+	if full && !force && !dryRun {
+		fmt.Println("WARNING: Full reset will remove ALL cached images and build layers!")
+		fmt.Println("This cannot be undone and will slow down subsequent builds.")
+		fmt.Print("Are you sure? Type 'yes' to confirm: ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if confirm != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	// Build request
+	req := &types.CleanupBuildahCacheRequest{
+		NodeName: nodeName,
+		Full:     full,
+		AllNodes: allNodes,
+		DryRun:   dryRun,
+		Force:    force,
+	}
+
+	// Submit cleanup job
+	response, err := c.CleanupBuildahCache(req)
+	if err != nil {
+		return fmt.Errorf("failed to submit cleanup buildah cache job: %w", err)
+	}
+
+	// Display response
+	if response.Success {
+		fmt.Printf("Cleanup buildah cache job submitted: %s\n", response.JobID)
+		fmt.Printf("Message: %s\n", response.Message)
+	} else {
+		return fmt.Errorf("failed to submit cleanup job: %s", response.Message)
+	}
+
+	// Display warnings
+	for _, warning := range response.Warnings {
+		fmt.Printf("Warning: %s\n", warning)
+	}
+
+	// Watch job progress if requested
+	if watch && response.JobID != "" {
+		fmt.Println()
+		return watchCleanupBuildahCacheJob(c, response.JobID)
+	}
+
+	// Provide hint about watching
+	if !watch && response.JobID != "" {
+		fmt.Printf("\nTo watch progress: jobforge cleanup-buildah-cache --watch\n")
+		fmt.Printf("To check status manually: use 'nomad job status %s'\n", response.JobID)
+	}
+
+	return nil
+}
+
+// watchCleanupBuildahCacheJob watches a cleanup job until it completes
+func watchCleanupBuildahCacheJob(c *client.Client, cleanupJobID string) error {
+	fmt.Printf("Watching cleanup job: %s\n", cleanupJobID)
+
+	// Poll for status updates
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.After(10 * time.Minute) // Max wait time for cleanup
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get job status using the general status endpoint
+			status, logs, err := c.GetCleanupBuildahCacheJobStatus(cleanupJobID)
+			if err != nil {
+				// Job might not be found yet if just submitted
+				continue
+			}
+
+			// Print status
+			timestamp := time.Now().Format("15:04:05")
+			switch status {
+			case "running", "pending":
+				fmt.Printf("[%s] ⏳ Status: %s\n", timestamp, status)
+			case "complete":
+				fmt.Printf("[%s] ✅ Cleanup completed successfully\n", timestamp)
+
+				// Display logs
+				if len(logs) > 0 {
+					fmt.Println("\n=== Cleanup Job Logs ===")
+					for _, line := range logs {
+						fmt.Println(line)
+					}
+				}
+				return nil
+			case "failed":
+				fmt.Printf("[%s] ❌ Cleanup job failed\n", timestamp)
+
+				// Display logs
+				if len(logs) > 0 {
+					fmt.Println("\n=== Cleanup Job Logs ===")
+					for _, line := range logs {
+						fmt.Println(line)
+					}
+				}
+				return fmt.Errorf("cleanup job failed")
+			}
+
+		case <-timeout:
+			return fmt.Errorf("timed out waiting for cleanup job to complete")
 		}
 	}
 }

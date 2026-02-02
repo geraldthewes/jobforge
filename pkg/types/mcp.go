@@ -144,3 +144,21 @@ type PruneStorageResponse struct {
 	Message  string   `json:"message"`
 	Warnings []string `json:"warnings,omitempty"`  // Any warnings (e.g., active builds)
 }
+
+// CleanupBuildahCacheRequest represents a request to cleanup corrupted buildah container database
+// This fixes "identifier is not a container" errors from interrupted builds
+type CleanupBuildahCacheRequest struct {
+	NodeName string `json:"node_name,omitempty"` // Optional: target specific node by name
+	AllNodes bool   `json:"all_nodes,omitempty"` // Cleanup on all Nomad nodes (sysbatch)
+	Full     bool   `json:"full,omitempty"`      // Full reset: remove all storage, not just fix containers
+	DryRun   bool   `json:"dry_run,omitempty"`   // Preview what would be cleaned
+	Force    bool   `json:"force,omitempty"`     // Skip safety checks for full reset
+}
+
+// CleanupBuildahCacheResponse represents the response from a cleanup buildah cache request
+type CleanupBuildahCacheResponse struct {
+	Success  bool     `json:"success"`
+	JobID    string   `json:"job_id,omitempty"`   // Nomad job ID for tracking the cleanup operation
+	Message  string   `json:"message"`
+	Warnings []string `json:"warnings,omitempty"` // Any warnings (e.g., active builds)
+}

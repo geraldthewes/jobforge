@@ -131,6 +131,48 @@ jobforge prune-storage --all --all-nodes --force
 - The `--force` flag is required for aggressive prune when active builds are detected
 - Use `--all-nodes` when storage issues are cluster-wide
 
+### Fixing Corrupted Buildah Storage
+
+Build failures can occur with the error `"identifier is not a container"` when Buildah's internal container database gets corrupted. This happens after interrupted builds, node crashes, or storage issues. Use the `cleanup-buildah-cache` command to fix this.
+
+```bash
+# Preview what would be cleaned (recommended first step)
+jobforge cleanup-buildah-cache --dry-run
+
+# Standard cleanup - fix corrupted container entries
+# This removes container database entries and orphaned lock files
+jobforge cleanup-buildah-cache
+
+# Watch cleanup job progress
+jobforge cleanup-buildah-cache --watch
+
+# Target a specific node
+jobforge cleanup-buildah-cache worker-1
+
+# Cleanup on all nodes
+jobforge cleanup-buildah-cache --all-nodes
+
+# Full reset - clear all storage directories (when standard cleanup fails)
+# Warning: This will slow down subsequent builds significantly
+jobforge cleanup-buildah-cache --full --force
+```
+
+**Important Notes:**
+- Use `--dry-run` first to see what would be cleaned
+- Standard cleanup (default) only fixes corrupted entries, preserving cached layers
+- Full reset (`--full`) clears everything - use only when standard cleanup doesn't fix the issue
+- The `--force` flag is required for full reset when active builds are detected
+- Use `--all-nodes` when corruption issues are cluster-wide
+
+**When to use each mode:**
+
+| Symptom | Command |
+|---------|---------|
+| "identifier is not a container" error | `jobforge cleanup-buildah-cache --watch` |
+| Orphaned `.lock` files preventing builds | `jobforge cleanup-buildah-cache --watch` |
+| Standard cleanup didn't fix the issue | `jobforge cleanup-buildah-cache --full --force --watch` |
+| Issues on all nodes | `jobforge cleanup-buildah-cache --all-nodes --watch` |
+
 ## Configuration Reference
 
 For complete job configuration options (YAML schema, test configuration, resource limits, webhooks, etc.), see [JobSpec.md](JobSpec.md).

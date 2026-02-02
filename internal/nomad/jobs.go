@@ -1536,3 +1536,221 @@ func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, prun
 
 	return jobSpec
 }
+
+// createCleanupBuildahCacheJobSpec creates a Nomad job specification for cleaning up corrupted buildah storage
+// This fixes "identifier is not a container" errors that occur when builds are interrupted
+func (nc *Client) createCleanupBuildahCacheJobSpec(req *types.CleanupBuildahCacheRequest, cleanupJobID string) *nomadapi.Job {
+	// Determine job type: sysbatch for all nodes, batch for single node
+	jobType := "batch"
+	if req.AllNodes {
+		jobType = "sysbatch"
+	}
+
+	// Build the cleanup commands
+	cleanupCommands := []string{
+		"#!/bin/bash",
+		"set -euo pipefail",
+		"",
+		"echo '=== Buildah Cache Cleanup Started ==='",
+		"echo \"Node: $(cat /proc/sys/kernel/hostname 2>/dev/null || echo 'unknown')\"",
+		"echo \"Time: $(date -Iseconds)\"",
+		"echo ''",
+		"",
+		"# Storage location",
+		"STORAGE_ROOT='/var/lib/containers'",
+		"",
+		"# Show current storage status",
+		"echo '=== Current Storage Status ==='",
+		"du -sh $STORAGE_ROOT 2>/dev/null || echo 'Storage directory not found'",
+		"echo ''",
+		"",
+		"# Check for corrupted state",
+		"echo '=== Checking for Corrupted Buildah State ==='",
+		"echo 'Listing containers (may show errors if corrupted):'",
+		"buildah containers 2>&1 || echo 'Container list command failed - database may be corrupted'",
+		"echo ''",
+		"",
+	}
+
+	if req.Full {
+		// Full reset mode - clear all storage
+		cleanupCommands = append(cleanupCommands,
+			"echo '=== Full Reset Mode ==='",
+			"echo 'WARNING: This will remove ALL cached images and build layers'",
+			"echo ''",
+		)
+
+		if req.DryRun {
+			cleanupCommands = append(cleanupCommands,
+				"echo '[DRY RUN] Would execute:'",
+				"echo '  - buildah rm --all'",
+				"echo '  - buildah rmi --all --force'",
+				"echo '  - rm -rf $STORAGE_ROOT/storage/overlay-containers/*'",
+				"echo '  - rm -rf $STORAGE_ROOT/storage/overlay-images/*'",
+				"echo '  - rm -rf $STORAGE_ROOT/storage/overlay-layers/*'",
+				"echo ''",
+				"echo '[DRY RUN] Current storage breakdown:'",
+				"du -sh $STORAGE_ROOT/storage/* 2>/dev/null || echo 'No storage subdirectories found'",
+				"echo ''",
+				"echo '[DRY RUN] Orphaned lock files:'",
+				"find $STORAGE_ROOT -name '*.lock' 2>/dev/null || echo 'No lock files found'",
+			)
+		} else {
+			cleanupCommands = append(cleanupCommands,
+				"# Step 1: Remove all container entries from database",
+				"echo 'Removing all container entries...'",
+				"buildah rm --all 2>/dev/null || echo 'buildah rm failed (expected if database corrupted)'",
+				"",
+				"# Step 2: Remove all images",
+				"echo 'Removing all images...'",
+				"buildah rmi --all --force 2>/dev/null || echo 'buildah rmi failed (database may be corrupted)'",
+				"",
+				"# Step 3: Clean up storage directories directly",
+				"echo 'Cleaning up overlay storage directories...'",
+				"rm -rf $STORAGE_ROOT/storage/overlay-containers/* 2>/dev/null || echo 'overlay-containers already clean'",
+				"rm -rf $STORAGE_ROOT/storage/overlay-images/* 2>/dev/null || echo 'overlay-images already clean'",
+				"rm -rf $STORAGE_ROOT/storage/overlay-layers/* 2>/dev/null || echo 'overlay-layers already clean'",
+				"",
+				"# Step 4: Remove orphaned lock files",
+				"echo 'Removing orphaned lock files...'",
+				"find $STORAGE_ROOT -name '*.lock' -delete 2>/dev/null || echo 'No lock files to remove'",
+				"",
+				"# Step 5: Reset the container database",
+				"echo 'Resetting container database...'",
+				"rm -f $STORAGE_ROOT/storage/libpod/bolt_state.db 2>/dev/null || echo 'No libpod database found'",
+				"rm -rf $STORAGE_ROOT/storage/overlay-containers 2>/dev/null",
+				"mkdir -p $STORAGE_ROOT/storage/overlay-containers",
+				"",
+				"echo 'Full reset completed'",
+			)
+		}
+	} else {
+		// Standard cleanup mode - fix corrupted entries without removing all data
+		cleanupCommands = append(cleanupCommands,
+			"echo '=== Standard Cleanup Mode ==='",
+			"echo 'Fixing corrupted container database entries'",
+			"echo ''",
+		)
+
+		if req.DryRun {
+			cleanupCommands = append(cleanupCommands,
+				"echo '[DRY RUN] Would execute:'",
+				"echo '  - buildah rm --all (remove container entries from database)'",
+				"echo '  - find $STORAGE_ROOT -name *.lock -delete (remove orphaned locks)'",
+				"echo ''",
+				"echo '[DRY RUN] Current containers in database:'",
+				"buildah containers 2>&1 || echo 'Unable to list containers (database may be corrupted)'",
+				"echo ''",
+				"echo '[DRY RUN] Orphaned lock files:'",
+				"find $STORAGE_ROOT -name '*.lock' -type f 2>/dev/null | wc -l | xargs -I{} echo '{} lock files found'",
+				"find $STORAGE_ROOT -name '*.lock' -type f 2>/dev/null | head -10",
+			)
+		} else {
+			cleanupCommands = append(cleanupCommands,
+				"# Step 1: Remove all container entries from the database",
+				"# This clears the \"identifier is not a container\" errors",
+				"echo 'Removing container entries from database...'",
+				"buildah rm --all 2>&1 || echo 'buildah rm encountered errors (expected if corrupted)'",
+				"",
+				"# Step 2: Remove orphaned lock files",
+				"# These can prevent new builds from starting",
+				"echo 'Removing orphaned lock files...'",
+				"LOCK_COUNT=$(find $STORAGE_ROOT -name '*.lock' -type f 2>/dev/null | wc -l)",
+				"echo \"Found $LOCK_COUNT lock files\"",
+				"find $STORAGE_ROOT -name '*.lock' -type f -delete 2>/dev/null || echo 'No lock files to remove'",
+				"echo \"Removed $LOCK_COUNT lock files\"",
+				"",
+				"# Step 3: Verify the fix",
+				"echo ''",
+				"echo '=== Verification ==='",
+				"echo 'Listing containers after cleanup:'",
+				"buildah containers 2>&1 && echo 'Container list successful - database is healthy' || echo 'Container list still failing'",
+				"",
+				"echo 'Standard cleanup completed'",
+			)
+		}
+	}
+
+	// Add final storage usage report
+	cleanupCommands = append(cleanupCommands,
+		"",
+		"echo ''",
+		"echo '=== Final Storage Status ==='",
+		"du -sh $STORAGE_ROOT 2>/dev/null || echo 'Storage directory empty or not found'",
+		"echo ''",
+		"echo '=== Cleanup Completed ==='",
+	)
+
+	// Build constraints for node targeting
+	var constraints []*nomadapi.Constraint
+	if req.NodeName != "" {
+		constraints = append(constraints, &nomadapi.Constraint{
+			LTarget: "${node.unique.name}",
+			RTarget: req.NodeName,
+			Operand: "=",
+		})
+	}
+
+	jobSpec := &nomadapi.Job{
+		ID:          &cleanupJobID,
+		Name:        &cleanupJobID,
+		Type:        stringPtr(jobType),
+		Namespace:   stringPtr(nc.config.Nomad.Namespace),
+		Region:      stringPtr(nc.config.Nomad.Region),
+		Datacenters: nc.config.Nomad.Datacenters,
+		Meta: map[string]string{
+			"operation": "cleanup-buildah-cache",
+			"dry_run":   fmt.Sprintf("%t", req.DryRun),
+			"full":      fmt.Sprintf("%t", req.Full),
+			"all_nodes": fmt.Sprintf("%t", req.AllNodes),
+		},
+		TaskGroups: []*nomadapi.TaskGroup{
+			{
+				Name:        stringPtr("cleanup"),
+				Count:       intPtr(1),
+				Constraints: constraints,
+				RestartPolicy: &nomadapi.RestartPolicy{
+					Attempts: intPtr(0), // No restart for cleanup jobs
+				},
+				Tasks: []*nomadapi.Task{
+					{
+						Name:   "main",
+						Driver: "docker",
+						Config: map[string]interface{}{
+							"image":      "quay.io/buildah/stable:latest",
+							"command":    "/bin/bash",
+							"args":       []string{"-c", strings.Join(cleanupCommands, "\n")},
+							"privileged": true, // Required for storage access
+							"volumes": []string{
+								"/opt/nomad/data/buildah-cache:/var/lib/containers:rw", // Persistent layer cache
+							},
+						},
+						Env: map[string]string{
+							"BUILDAH_ISOLATION": "chroot",
+							"STORAGE_DRIVER":    "overlay",
+						},
+						Resources: &nomadapi.Resources{
+							CPU:      intPtr(200),
+							MemoryMB: intPtr(512),
+						},
+						KillTimeout: durationPtr("2m"),
+						LogConfig: &nomadapi.LogConfig{
+							MaxFiles:      intPtr(3),
+							MaxFileSizeMB: intPtr(5),
+						},
+					},
+				},
+				EphemeralDisk: &nomadapi.EphemeralDisk{
+					SizeMB: intPtr(100),
+				},
+			},
+		},
+	}
+
+	// Add node_name metadata if specified
+	if req.NodeName != "" {
+		jobSpec.Meta["node_name"] = req.NodeName
+	}
+
+	return jobSpec
+}

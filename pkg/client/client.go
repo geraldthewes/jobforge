@@ -438,3 +438,52 @@ func (c *Client) GetPruneJobStatus(pruneJobID string) (string, []string, error) 
 
 	return statusResp.Status, statusResp.Logs, nil
 }
+
+// CleanupBuildahCache submits a cleanup buildah cache job to fix corrupted storage
+func (c *Client) CleanupBuildahCache(req *types.CleanupBuildahCacheRequest) (*types.CleanupBuildahCacheResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest("POST", "/json/cleanup-buildah-cache", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleErrorResponse(resp)
+	}
+
+	var response types.CleanupBuildahCacheResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &response, nil
+}
+
+// GetCleanupBuildahCacheJobStatus gets the status and logs for a cleanup cache job
+func (c *Client) GetCleanupBuildahCacheJobStatus(cleanupJobID string) (string, []string, error) {
+	// Use the dedicated cleanup cache job status endpoint (queries Nomad directly)
+	resp, err := c.doRequest("GET", fmt.Sprintf("/json/cleanup-cache-job/%s/status", cleanupJobID), nil)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, c.handleErrorResponse(resp)
+	}
+
+	var statusResp struct {
+		Status string   `json:"status"`
+		Logs   []string `json:"logs,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
+		return "", nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return statusResp.Status, statusResp.Logs, nil
+}

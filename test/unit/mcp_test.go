@@ -90,6 +90,7 @@ func TestMCPToolDefinitions(t *testing.T) {
 		"getHistory",
 		"purgeFailedJob",
 		"pruneStorage",
+		"cleanupBuildahCache",
 	}
 
 	if len(tools) != len(expectedTools) {

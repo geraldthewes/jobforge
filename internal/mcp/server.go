@@ -145,6 +145,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/json/prune-storage", s.handlePruneStorage)
 	mux.HandleFunc("/mcp/prune-storage", s.handlePruneStorage)
 	mux.HandleFunc("/json/prune-job/", s.handlePruneJobStatus)
+	mux.HandleFunc("/json/cleanup-buildah-cache", s.handleCleanupBuildahCache)
+	mux.HandleFunc("/mcp/cleanup-buildah-cache", s.handleCleanupBuildahCache)
+	mux.HandleFunc("/json/cleanup-cache-job/", s.handleCleanupCacheJobStatus)
 
 	// MCP Protocol endpoints
 	mux.HandleFunc("/mcp", s.handleMCPRequest)           // JSON-RPC over HTTP
@@ -1257,6 +1260,8 @@ func (s *Server) handleMCPToolsCall(req MCPRequest) MCPResponse {
 		response = s.mcpPurgeFailedJob(req.ID, arguments)
 	case "pruneStorage":
 		response = s.mcpPruneStorage(req.ID, arguments)
+	case "cleanupBuildahCache":
+		response = s.mcpCleanupBuildahCache(req.ID, arguments)
 	default:
 		response = NewMCPErrorResponse(req.ID, MCPErrorMethodNotFound, "Tool not found", toolName)
 	}
@@ -1809,6 +1814,174 @@ func (s *Server) mcpPruneStorage(id interface{}, args map[string]interface{}) MC
 		Content: NewMCPJSONContent(map[string]interface{}{
 			"success":  true,
 			"job_id":   pruneJobID,
+			"message":  message,
+			"warnings": warnings,
+		}),
+	}
+	return NewMCPResponse(id, result)
+}
+
+// handleCleanupBuildahCache handles cleanup buildah cache requests
+func (s *Server) handleCleanupBuildahCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req types.CleanupBuildahCacheRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, "Invalid request body", http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Log request details at debug level
+	if s.logger.Level >= logrus.DebugLevel {
+		reqJSON, _ := json.MarshalIndent(req, "", "  ")
+		s.logger.WithFields(map[string]interface{}{
+			"endpoint":    "cleanupBuildahCache",
+			"remote_addr": r.RemoteAddr,
+			"request":     string(reqJSON),
+		}).Debug("Cleanup buildah cache request details")
+	}
+
+	// Safety check: warn about active builds
+	var warnings []string
+	if !req.Force {
+		activeBuilds, err := s.nomadClient.CheckActiveBuildJobs()
+		if err != nil {
+			s.logger.WithError(err).Warn("Failed to check for active build jobs")
+		} else if len(activeBuilds) > 0 {
+			warnings = append(warnings, fmt.Sprintf("Warning: %d active build job(s) detected. Use --force to proceed anyway.", len(activeBuilds)))
+			if !req.DryRun {
+				// For non-dry-run without force, reject if full reset requested
+				if req.Full {
+					s.writeErrorResponse(w, "Cannot perform full reset with active builds", http.StatusConflict,
+						fmt.Sprintf("%d active build(s) detected. Use --force to override.", len(activeBuilds)))
+					return
+				}
+			}
+		}
+	}
+
+	// Submit cleanup job
+	cleanupJobID, err := s.nomadClient.RunCleanupBuildahCache(&req)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to submit cleanup buildah cache job", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := types.CleanupBuildahCacheResponse{
+		Success:  true,
+		JobID:    cleanupJobID,
+		Message:  "Cleanup buildah cache job submitted successfully",
+		Warnings: warnings,
+	}
+
+	if req.DryRun {
+		response.Message = "Cleanup buildah cache job submitted in dry-run mode (no actual changes)"
+	}
+
+	s.writeJSONResponse(w, response)
+
+	s.logger.WithFields(logrus.Fields{
+		"cleanup_job_id": cleanupJobID,
+		"dry_run":        req.DryRun,
+		"full":           req.Full,
+		"all_nodes":      req.AllNodes,
+		"node_name":      req.NodeName,
+	}).Info("Cleanup buildah cache job submitted")
+}
+
+// handleCleanupCacheJobStatus handles GET /json/cleanup-cache-job/{jobID}/status
+// This queries Nomad directly for cleanup job status (not Consul storage)
+func (s *Server) handleCleanupCacheJobStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse URL path: /json/cleanup-cache-job/{jobID}/status
+	path := strings.TrimPrefix(r.URL.Path, "/json/cleanup-cache-job/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) < 2 || parts[1] != "status" {
+		http.Error(w, "Invalid path. Use /json/cleanup-cache-job/{jobID}/status", http.StatusBadRequest)
+		return
+	}
+
+	jobID := parts[0]
+	if jobID == "" {
+		http.Error(w, "Job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	status, logs, err := s.nomadClient.GetCleanupBuildahCacheJobStatus(jobID)
+	if err != nil {
+		s.writeErrorResponse(w, "Failed to get cleanup job status", http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response := struct {
+		Status string   `json:"status"`
+		Logs   []string `json:"logs,omitempty"`
+	}{
+		Status: status,
+		Logs:   logs,
+	}
+
+	s.writeJSONResponse(w, response)
+}
+
+// mcpCleanupBuildahCache handles the MCP cleanupBuildahCache tool call
+func (s *Server) mcpCleanupBuildahCache(id interface{}, args map[string]interface{}) MCPResponse {
+	req := types.CleanupBuildahCacheRequest{}
+
+	if nodeName, ok := args["node_name"].(string); ok {
+		req.NodeName = nodeName
+	}
+	if allNodes, ok := args["all_nodes"].(bool); ok {
+		req.AllNodes = allNodes
+	}
+	if full, ok := args["full"].(bool); ok {
+		req.Full = full
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok {
+		req.DryRun = dryRun
+	}
+	if force, ok := args["force"].(bool); ok {
+		req.Force = force
+	}
+
+	// Safety check: warn about active builds
+	var warnings []string
+	if !req.Force {
+		activeBuilds, err := s.nomadClient.CheckActiveBuildJobs()
+		if err != nil {
+			s.logger.WithError(err).Warn("Failed to check for active build jobs")
+		} else if len(activeBuilds) > 0 {
+			warnings = append(warnings, fmt.Sprintf("Warning: %d active build job(s) detected", len(activeBuilds)))
+			if !req.DryRun && req.Full {
+				return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Cannot perform full reset with active builds",
+					fmt.Sprintf("%d active build(s) detected. Use force=true to override.", len(activeBuilds)))
+			}
+		}
+	}
+
+	// Submit cleanup job
+	cleanupJobID, err := s.nomadClient.RunCleanupBuildahCache(&req)
+	if err != nil {
+		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to submit cleanup buildah cache job", err.Error())
+	}
+
+	message := "Cleanup buildah cache job submitted successfully"
+	if req.DryRun {
+		message = "Cleanup buildah cache job submitted in dry-run mode (no actual changes)"
+	}
+
+	result := ToolCallResult{
+		Content: NewMCPJSONContent(map[string]interface{}{
+			"success":  true,
+			"job_id":   cleanupJobID,
 			"message":  message,
 			"warnings": warnings,
 		}),

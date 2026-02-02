@@ -94,6 +94,13 @@ jobforge prune-storage --all --force  # Aggressive prune (all cached images)
 jobforge prune-storage gpu005 --dry-run  # Target a specific node by name
 jobforge prune-storage --all-nodes --dry-run  # Prune on all nodes (sysbatch)
 
+# Fix corrupted buildah storage ("identifier is not a container" errors)
+jobforge cleanup-buildah-cache --dry-run  # Preview what would be cleaned
+jobforge cleanup-buildah-cache            # Standard cleanup (fix corrupted entries)
+jobforge cleanup-buildah-cache --watch    # Watch cleanup progress
+jobforge cleanup-buildah-cache --full --force  # Full reset (clear all storage)
+jobforge cleanup-buildah-cache --all-nodes    # Cleanup on all nodes
+
 # Version management
 jobforge version-info           # Show current version and branch
 jobforge version-major <ver>    # Set major version (resets minor/patch to 0)
@@ -134,6 +141,7 @@ Direct HTTP/JSON endpoints for testing and non-MCP integrations:
 
 ### Storage Management Endpoints
 - `POST /json/prune-storage` - Submit storage prune job
+- `POST /json/cleanup-buildah-cache` - Fix corrupted buildah storage
 
 ### 3. Health & Monitoring
 
