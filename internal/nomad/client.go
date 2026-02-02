@@ -704,7 +704,7 @@ func (nc *Client) KillJob(job *types.Job) error {
 		testStatus, err := nc.getJobStatus(testJobID)
 		if err == nil && testStatus == "running" {
 			nc.logger.WithField("test_job_id", testJobID).Info("Gracefully stopping test job")
-			
+
 			if _, _, err := nc.client.Jobs().Deregister(testJobID, false, nil); err != nil {
 				nc.logger.WithError(err).Warn("Graceful stop failed, forcing termination")
 				if _, _, err := nc.client.Jobs().Deregister(testJobID, true, nil); err != nil {
@@ -713,7 +713,22 @@ func (nc *Client) KillJob(job *types.Job) error {
 			}
 		}
 	}
-	
+
+	// Handle external test job (python tests use TestJobNomadID instead of TestJobIDs)
+	if job.TestJobNomadID != "" {
+		testStatus, err := nc.getJobStatus(job.TestJobNomadID)
+		if err == nil && (testStatus == "running" || testStatus == "pending") {
+			nc.logger.WithField("test_job_id", job.TestJobNomadID).Info("Gracefully stopping external test job")
+
+			if _, _, err := nc.client.Jobs().Deregister(job.TestJobNomadID, false, nil); err != nil {
+				nc.logger.WithError(err).Warn("Graceful stop failed, forcing termination")
+				if _, _, err := nc.client.Jobs().Deregister(job.TestJobNomadID, true, nil); err != nil {
+					errors = append(errors, fmt.Sprintf("external test job %s: %v", job.TestJobNomadID, err))
+				}
+			}
+		}
+	}
+
 	// Handle publish job
 	if job.PublishJobID != "" {
 		publishStatus, err := nc.getJobStatus(job.PublishJobID)
