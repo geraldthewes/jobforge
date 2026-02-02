@@ -121,9 +121,9 @@ The endpoint is used for agent communication:
 - **Endpoint:** `/json`
 - **Transport:** JSON-RPC 2.0 over HTTP
 
-### 3. Direct JSON-RPC API (Testing/Debugging)
+### 3. REST API
 
-Direct HTTP/JSON endpoints for testing and non-MCP integrations:
+Direct HTTP/JSON endpoints:
 - `POST /json/submitJob` - Submit build jobs
 - `POST /json/getStatus` - Get job status
 - `POST /json/getLogs` - Get job logs
@@ -1399,7 +1399,7 @@ docker push your-registry:5000/jobforge-service:latest
 ### Service Endpoints
 
 Once deployed, the service will be available at:
-- **API**: `http://service-ip:8080` (MCP endpoints, configurable via SERVER_PORT)
+- **API**: `http://service-ip:8080` (REST endpoints, configurable via SERVER_PORT)
 - **Health**: `http://service-ip:8080/health` (on SERVER_PORT)
 - **Metrics**: `http://service-ip:9090/metrics` (on METRICS_PORT, configurable via METRICS_PORT)
 
@@ -1465,24 +1465,23 @@ export LOG_LEVEL=debug
 ./jobforge-service
 ```
 
-#### MCP Protocol Verbose Logging
+#### API Verbose Logging
 
-For debugging MCP protocol communication issues, enable verbose logging to capture full request/response JSON:
+For debugging API communication issues, enable verbose logging to capture full request/response JSON:
 
 ```bash
-export MCP_LOG_LEVEL=1
+export API_LOG_LEVEL=1
 ./jobforge-service
 ```
 
 **Log Levels:**
-- `MCP_LOG_LEVEL=0` (default): Compact structured logs with method names and IDs
-- `MCP_LOG_LEVEL=1`: Verbose logging including:
+- `API_LOG_LEVEL=0` (default): Compact structured logs with endpoint names
+- `API_LOG_LEVEL=1`: Verbose logging including:
   - Full raw request JSON
-  - Tool name extraction for `tools/call` requests
   - Full raw response JSON
   - Useful for debugging client integration issues
 
-**Note:** This setting is independent of `LOG_LEVEL` and only affects MCP protocol logging. Use it when troubleshooting MCP client connections or tool invocations.
+**Note:** This setting is independent of `LOG_LEVEL` and only affects API logging.
 
 ### Log Analysis
 

@@ -1,8 +1,8 @@
 package types
 
-// MCP Request/Response types for the build service
+// API Request/Response types for the build service
 
-// SubmitJobRequest represents an MCP request to submit a new job
+// SubmitJobRequest represents an API request to submit a new job
 type SubmitJobRequest struct {
 	JobConfig JobConfig `json:"job_config"`
 }
@@ -13,7 +13,7 @@ type SubmitJobResponse struct {
 	Status JobStatus `json:"status"`
 }
 
-// GetStatusRequest represents an MCP request to get job status
+// GetStatusRequest represents an API request to get job status
 type GetStatusRequest struct {
 	JobID string `json:"job_id"`
 }
@@ -28,7 +28,7 @@ type GetStatusResponse struct {
 	Allocations *JobAllocations `json:"allocations,omitempty"` // Allocation details with warnings
 }
 
-// GetLogsRequest represents an MCP request to get job logs
+// GetLogsRequest represents an API request to get job logs
 type GetLogsRequest struct {
 	JobID string `json:"job_id"`
 	Phase string `json:"phase,omitempty"` // Optional: "build", "test", "publish"
@@ -40,7 +40,7 @@ type GetLogsResponse struct {
 	Logs  JobLogs `json:"logs"`
 }
 
-// KillJobRequest represents an MCP request to kill a job
+// KillJobRequest represents an API request to kill a job
 type KillJobRequest struct {
 	JobID string `json:"job_id"`
 }
@@ -52,7 +52,7 @@ type KillJobResponse struct {
 	Message string `json:"message"`
 }
 
-// CleanupRequest represents an MCP request to cleanup resources
+// CleanupRequest represents an API request to cleanup resources
 type CleanupRequest struct {
 	JobID string `json:"job_id,omitempty"` // Optional: cleanup specific job
 	All   bool   `json:"all,omitempty"`    // Optional: cleanup all zombie jobs
@@ -65,7 +65,7 @@ type CleanupResponse struct {
 	Message      string   `json:"message"`
 }
 
-// GetHistoryRequest represents an MCP request to get job history
+// GetHistoryRequest represents an API request to get job history
 type GetHistoryRequest struct {
 	Limit  int `json:"limit,omitempty"`  // Optional: number of records to return
 	Offset int `json:"offset,omitempty"` // Optional: pagination offset
@@ -93,7 +93,7 @@ type StreamLogsMessage struct {
 	Message   string `json:"message"`
 }
 
-// ErrorResponse represents an error response for MCP requests
+// ErrorResponse represents an error response for API requests
 type ErrorResponse struct {
 	Error   string `json:"error"`
 	Code    int    `json:"code"`

@@ -24,20 +24,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 This is the Nomad Build Service, consisting of:
-1. **MCP Server**: Lightweight, stateless Go application providing JSON-RPC over HTTP interface
+1. **API Server**: Lightweight, stateless Go application providing REST API over HTTP
 2. **CLI Tool**: Command-line client with YAML configuration support and version management
 
 The service enables users and coding agents to submit Docker image build jobs remotely using Nomad as the backend infrastructure. It orchestrates builds, tests, and publishes using Buildah for daemonless image building.
 
 **For complete project requirements and architecture details, see [PRD.md](PRD.md).**
 
-**Current Status:** Fully implemented and operational. The service provides a complete build-test-publish pipeline with improved Docker-native test execution. MCP transport has been simplified to JSON-RPC over HTTP only.
+**Current Status:** Fully implemented and operational. The service provides a complete build-test-publish pipeline with improved Docker-native test execution.
 
 ## Architecture (Current Implementation)
 
 The system consists of:
 
-- **MCP Server**: Stateless Go application that translates MCP requests into Nomad API calls
+- **API Server**: Stateless Go application that translates REST API requests into Nomad API calls
 - **Nomad Jobs**: Three phases of ephemeral batch jobs:
   1. **Build phase**: Uses Buildah to build Docker images from Git repos and push to temporary registry location
   2. **Test phase**: Creates separate Nomad jobs using Docker driver directly to run the built image (no buildah complexity)
@@ -52,22 +52,7 @@ The system consists of:
 - **Go 1.22+**
 - **Nomad 1.10+** with Vault integration
 - **Buildah** (latest stable via `quay.io/buildah/stable`)
-- **MCP Protocol** for agent communication
-
-### MCP Specification Compliance
-- **CRITICAL**: All MCP server implementations and changes MUST conform to the latest Model Context Protocol specification
-- **Specification URL**: https://modelcontextprotocol.io/specification/latest
-- **Current Protocol Version**: `2025-06-18` (as of latest update)
-- **Supported Transport**: JSON-RPC over HTTP only (SSE and Streamable HTTP have been removed for simplicity)
-- **Required Compliance Areas**:
-  - Initialization sequence (initialize request/response, notifications/initialized)
-  - Protocol version negotiation
-  - JSON-RPC 2.0 message format
-  - Notification vs request handling (ID field presence)
-  - Tool definitions and invocation format
-  - Error codes and error handling
-- When implementing new features or fixing bugs, always verify against the latest spec
-- Integration tests should validate spec compliance
+- **REST API** over HTTP
 
 ### Key Libraries to Use
 - `github.com/hashicorp/nomad/api` - Nomad API client
@@ -81,19 +66,20 @@ The system consists of:
 - Stateless design for horizontal scaling
 
 ### API Validation Requirements
-- **CRITICAL**: Both the web interface (`/mcp/submitJob`) and the MCP interface (`tools/call` with `submitJob`) must have identical parameter validation
-- Always call `validateJobConfig()` in both interfaces to ensure consistent validation
-- Required parameters must match between both interfaces (owner, repo_url, git_ref, dockerfile_path, image_name, image_tags, registry_url)
+- Always call `validateJobConfig()` to ensure consistent validation
+- Required parameters: owner, repo_url, git_ref, dockerfile_path, image_name, image_tags, registry_url
 - This prevents runtime errors like "invalid reference format" when Docker image names are malformed due to missing parameters
 
-## MCP API Endpoints
+## REST API Endpoints
 
-The service exposes these MCP endpoints via JSON-RPC over HTTP:
-- `submitJob`: Submit build request with Git repo, credentials refs, test configuration (commands, entry point, environment variables)
-- `getStatus`: Poll job status (`PENDING`, `BUILDING`, `TESTING`, `PUBLISHING`, `SUCCEEDED`, `FAILED`)
-- `getLogs`: Retrieve phase-specific logs for debugging
-- `killJob`: Terminate running jobs
-- `cleanup`: Resource cleanup
+The service exposes these REST endpoints:
+- `POST /json/submitJob`: Submit build request with Git repo, credentials refs, test configuration (commands, entry point, environment variables)
+- `POST /json/getStatus`: Poll job status (`PENDING`, `BUILDING`, `TESTING`, `PUBLISHING`, `SUCCEEDED`, `FAILED`)
+- `POST /json/getLogs`: Retrieve phase-specific logs for debugging
+- `POST /json/killJob`: Terminate running jobs
+- `POST /json/cleanup`: Resource cleanup
+- `GET /json/job/{id}/status`: RESTful status endpoint
+- `GET /json/job/{id}/logs`: RESTful logs endpoint
 
 ## CLI Tool
 
@@ -175,16 +161,16 @@ Two approaches for monitoring job progress:
   ```
 - Use the discovered address for curl commands, e.g.:
   ```bash
-  curl -X POST http://10.0.1.12:31183/mcp/submitJob \
+  curl -X POST http://10.0.1.12:31183/json/submitJob \
     -H "Content-Type: application/json" \
-    -d '{"jobConfig": {...}}'
+    -d '{"job_config": {...}}'
   ```
 
 **Development Steps:**
 1. Build: `make build`
 2. Deploy: `REGISTRY_URL=registry.cluster:5000 make nomad-restart`
 3. Discover service: `consul catalog service jobforge-service`
-4. Test with discovered address: `curl -X POST http://<discovered-ip>:<discovered-port>/mcp/submitJob`
+4. Test with discovered address: `curl -X POST http://<discovered-ip>:<discovered-port>/json/submitJob`
 
 **Do not assume your changes work without testing them immediately!**
 
@@ -199,7 +185,7 @@ Two approaches for monitoring job progress:
 ## Testing Strategy
 
 Plan for:
-- Unit tests for MCP handlers
+- Unit tests for API handlers
 - Integration tests using mocked Nomad API
 - End-to-end test with actual hello-world Docker image build
 
@@ -310,7 +296,7 @@ curl -s http://10.0.1.12:8500/v1/catalog/service/jobforge-service | jq -r '.[0] 
 
 # Submit manual test job
 SERVICE_URL=<discovered-url>
-curl -X POST http://${SERVICE_URL}/mcp/submitJob \
+curl -X POST http://${SERVICE_URL}/json/submitJob \
   -H "Content-Type: application/json" \
   -d '{
     "job_config": {
@@ -338,10 +324,10 @@ nomad job status build-<job-id>
 nomad alloc logs -f <alloc-id>  # Follow build progress and check for errors
 
 # Check final status (RESTful endpoint)
-curl http://${SERVICE_URL}/mcp/job/<job-id>/status
+curl http://${SERVICE_URL}/json/job/<job-id>/status
 
-# Get logs (RESTful endpoint)  
-curl http://${SERVICE_URL}/mcp/job/<job-id>/logs
+# Get logs (RESTful endpoint)
+curl http://${SERVICE_URL}/json/job/<job-id>/logs
 ```
 
 **Do not assume your changes work without testing them immediately!**
@@ -364,9 +350,8 @@ go test ./...
 ```
 
 This command will:
-- Run all unit tests (17 tests)
+- Run all unit tests
 - Run integration tests (1 end-to-end test against deployed service)
-- Verify MCP tool loading from YAML resources
 - Test the complete build-test-publish pipeline
 
 ### Test Structure
@@ -380,7 +365,7 @@ This command will:
 ```
 ?       nomad-mcp-builder/cmd/server    [no test files]
 ?       nomad-mcp-builder/internal/config       [no test files]
-?       nomad-mcp-builder/internal/mcp  [no test files]
+?       nomad-mcp-builder/internal/server  [no test files]
 ...
 ok      nomad-mcp-builder/test/integration      15.138s
 ok      nomad-mcp-builder/test/unit     0.014s
@@ -391,7 +376,6 @@ ok      nomad-mcp-builder/test/unit     0.014s
 - ✅ Complete build-test-publish workflow (15-20s duration)
 - ✅ All phases succeed (build → test → publish)
 - ✅ Job logs and metrics captured
-- ✅ MCP tools load correctly from YAML resources
 
 ### When to Run Tests
 
@@ -399,11 +383,9 @@ ok      nomad-mcp-builder/test/unit     0.014s
 2. **Before committing changes**
 3. **When you think all tasks are complete**
 4. **After fixing bugs**
-5. **When modifying MCP tool definitions**
 
 ### Troubleshooting Test Failures
 
-- **"tools directory not found"**: Resource loading path issue (should be auto-resolved)
 - **Integration test skips**: Consul/Nomad services not running
 - **Build failures**: Check that the service can connect to Nomad cluster
 

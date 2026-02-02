@@ -1,4 +1,4 @@
-package mcp
+package server
 
 import (
 	"bytes"
@@ -23,7 +23,7 @@ import (
 	"nomad-mcp-builder/pkg/types"
 )
 
-// Server represents the MCP server
+// Server represents the API server
 type Server struct {
 	config     *config.Config
 	nomadClient *nomad.Client
@@ -37,10 +37,6 @@ type Server struct {
 	// Job-level mutexes to prevent concurrent updates to the same job
 	jobMutexes map[string]*sync.Mutex
 	jobMutexLock sync.RWMutex
-
-	// MCP session management (session ID -> creation time)
-	mcpSessions map[string]time.Time
-	sessionMutex sync.RWMutex
 
 	// WebSocket upgrader
 	upgrader websocket.Upgrader
@@ -87,7 +83,7 @@ func extractPythonTestOutput(logs []string) []string {
 	return pythonOutput
 }
 
-// NewServer creates a new MCP server
+// NewServer creates a new API server
 func NewServer(cfg *config.Config, nomadClient *nomad.Client, storage *storage.ConsulStorage, logger *logrus.Logger) *Server {
 	return &Server{
 		config:        cfg,
@@ -96,7 +92,6 @@ func NewServer(cfg *config.Config, nomadClient *nomad.Client, storage *storage.C
 		logger:        logger,
 		wsConnections: make(map[string][]*websocket.Conn),
 		jobMutexes:    make(map[string]*sync.Mutex),
-		mcpSessions:   make(map[string]time.Time),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins for now
@@ -113,44 +108,29 @@ func NewServer(cfg *config.Config, nomadClient *nomad.Client, storage *storage.C
 	}
 }
 
-// Start starts the MCP server
+// Start starts the API server
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// RESTful API endpoints (both /json and /mcp prefixes for compatibility)
+	// RESTful API endpoints
 	mux.HandleFunc("/json/submitJob", s.handleSubmitJob)
-	mux.HandleFunc("/mcp/submitJob", s.handleSubmitJob)
 	mux.HandleFunc("/json/getStatus", s.handleGetStatus)
-	mux.HandleFunc("/mcp/getStatus", s.handleGetStatus)
 	mux.HandleFunc("/json/getLogs", s.handleGetLogs)
-	mux.HandleFunc("/mcp/getLogs", s.handleGetLogs)
 	mux.HandleFunc("/json/killJob", s.handleKillJob)
-	mux.HandleFunc("/mcp/killJob", s.handleKillJob)
 	mux.HandleFunc("/json/cleanup", s.handleCleanup)
-	mux.HandleFunc("/mcp/cleanup", s.handleCleanup)
 	mux.HandleFunc("/json/getHistory", s.handleGetHistory)
-	mux.HandleFunc("/mcp/getHistory", s.handleGetHistory)
 	mux.HandleFunc("/json/job/", s.handleJobResource)
-	mux.HandleFunc("/mcp/job/", s.handleJobResource)
 
 	// Lock management endpoints
 	mux.HandleFunc("/json/locks", s.handleListLocks)
-	mux.HandleFunc("/mcp/locks", s.handleListLocks)
 	mux.HandleFunc("/json/locks/force-unlock", s.handleForceUnlock)
-	mux.HandleFunc("/mcp/locks/force-unlock", s.handleForceUnlock)
 	mux.HandleFunc("/json/active-jobs", s.handleListActiveJobs)
-	mux.HandleFunc("/mcp/active-jobs", s.handleListActiveJobs)
 
 	// Storage management endpoints
 	mux.HandleFunc("/json/prune-storage", s.handlePruneStorage)
-	mux.HandleFunc("/mcp/prune-storage", s.handlePruneStorage)
 	mux.HandleFunc("/json/prune-job/", s.handlePruneJobStatus)
 	mux.HandleFunc("/json/cleanup-buildah-cache", s.handleCleanupBuildahCache)
-	mux.HandleFunc("/mcp/cleanup-buildah-cache", s.handleCleanupBuildahCache)
 	mux.HandleFunc("/json/cleanup-cache-job/", s.handleCleanupCacheJobStatus)
-
-	// MCP Protocol endpoints
-	mux.HandleFunc("/mcp", s.handleMCPRequest)           // JSON-RPC over HTTP
 
 	// Health check endpoints
 	mux.HandleFunc("/health", s.handleHealth)
@@ -163,7 +143,7 @@ func (s *Server) Start(ctx context.Context) error {
 		WriteTimeout: 30 * time.Second,
 	}
 
-	s.logger.WithField("address", server.Addr).Info("Starting MCP server")
+	s.logger.WithField("address", server.Addr).Info("Starting API server")
 
 	// Start background cleanup routine
 	go s.backgroundCleanup(ctx)
@@ -979,680 +959,6 @@ func (s *Server) convertJobToHistory(job *types.Job) *types.JobHistory {
 
 	return history
 }
-
-// MCP Protocol Handlers
-
-// handleMCPRequest processes standard MCP JSON-RPC requests
-func (s *Server) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-
-	// Log incoming request in web server format
-	s.logger.WithFields(map[string]interface{}{
-		"method":         r.Method,
-		"uri":            r.RequestURI,
-		"remote_addr":    r.RemoteAddr,
-		"user_agent":     r.UserAgent(),
-		"content_length": r.ContentLength,
-		"content_type":   r.Header.Get("Content-Type"),
-	}).Info("MCP request received")
-
-	// Handle CORS preflight
-	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Origin", s.config.Server.CORSOrigin)
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, mcp-protocol-version")
-		w.Header().Set("Access-Control-Max-Age", "3600")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Set CORS headers for actual request
-	w.Header().Set("Access-Control-Allow-Origin", s.config.Server.CORSOrigin)
-
-	if r.Method != http.MethodPost {
-		duration := time.Since(startTime)
-		s.logger.WithFields(map[string]interface{}{
-			"method":       r.Method,
-			"uri":          r.RequestURI,
-			"remote_addr":  r.RemoteAddr,
-			"status":       http.StatusMethodNotAllowed,
-			"duration_ms":  duration.Milliseconds(),
-			"error":        "Method not allowed",
-		}).Info("MCP request completed")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Read body for potential verbose logging
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		duration := time.Since(startTime)
-		s.logger.WithFields(map[string]interface{}{
-			"method":       r.Method,
-			"uri":          r.RequestURI,
-			"remote_addr":  r.RemoteAddr,
-			"status":       http.StatusBadRequest,
-			"duration_ms":  duration.Milliseconds(),
-			"error":        "Failed to read body: " + err.Error(),
-		}).Info("MCP request completed")
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
-		return
-	}
-
-	var mcpReq MCPRequest
-	if err := json.Unmarshal(bodyBytes, &mcpReq); err != nil {
-		duration := time.Since(startTime)
-		s.logger.WithFields(map[string]interface{}{
-			"method":       r.Method,
-			"uri":          r.RequestURI,
-			"remote_addr":  r.RemoteAddr,
-			"status":       http.StatusBadRequest,
-			"duration_ms":  duration.Milliseconds(),
-			"error":        "Parse error: " + err.Error(),
-		}).Info("MCP request completed")
-		response := NewMCPErrorResponse(nil, MCPErrorParseError, "Parse error", err.Error())
-		s.writeMCPResponse(w, response)
-		return
-	}
-
-	// Log the actual MCP method being called
-	s.logger.WithFields(map[string]interface{}{
-		"mcp_method":   mcpReq.Method,
-		"mcp_id":       mcpReq.ID,
-		"remote_addr":  r.RemoteAddr,
-	}).Info("MCP method call")
-
-	// Verbose logging: log full request and extract tool name for tools/call
-	if s.config.Logging.LogLevel >= 1 {
-		logFields := map[string]interface{}{
-			"raw_request": string(bodyBytes),
-			"mcp_method":  mcpReq.Method,
-		}
-
-		// Extract tool name if this is a tools/call
-		if mcpReq.Method == "tools/call" {
-			if params, ok := mcpReq.Params.(map[string]interface{}); ok {
-				if toolName, ok := params["name"].(string); ok {
-					logFields["tool_name"] = toolName
-				}
-			}
-		}
-
-		s.logger.WithFields(logFields).Info("MCP request detail (LOG_LEVEL=1)")
-	}
-
-	// Handle notifications (JSON-RPC requests without id field)
-	// Notifications don't expect a response, just acknowledge with 200 OK
-	if mcpReq.ID == nil {
-		duration := time.Since(startTime)
-		s.logger.WithFields(map[string]interface{}{
-			"method":       r.Method,
-			"uri":          r.RequestURI,
-			"remote_addr":  r.RemoteAddr,
-			"status":       http.StatusOK,
-			"duration_ms":  duration.Milliseconds(),
-			"mcp_method":   mcpReq.Method,
-			"mcp_id":       mcpReq.ID,
-			"notification": true,
-		}).Info("MCP notification received")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	var response MCPResponse
-	switch mcpReq.Method {
-	case "tools/list":
-		response = s.handleMCPToolsList(mcpReq)
-	case "tools/call":
-		response = s.handleMCPToolsCall(mcpReq)
-	case "initialize":
-		response = s.handleMCPInitialize(mcpReq)
-	case "notifications/initialized":
-		// Client signals initialization complete - acknowledge with empty result
-		response = NewMCPResponse(mcpReq.ID, map[string]interface{}{})
-	default:
-		response = NewMCPErrorResponse(mcpReq.ID, MCPErrorMethodNotFound, "Method not found", mcpReq.Method)
-	}
-
-	duration := time.Since(startTime)
-	statusCode := http.StatusOK
-	if response.Error != nil {
-		statusCode = http.StatusBadRequest
-	}
-
-	s.logger.WithFields(map[string]interface{}{
-		"method":       r.Method,
-		"uri":          r.RequestURI,
-		"remote_addr":  r.RemoteAddr,
-		"status":       statusCode,
-		"duration_ms":  duration.Milliseconds(),
-		"mcp_method":   mcpReq.Method,
-		"mcp_id":       mcpReq.ID,
-		"mcp_success":  response.Error == nil,
-	}).Info("MCP request completed")
-
-	// Verbose logging: log full response
-	if s.config.Logging.LogLevel >= 1 {
-		if responseJSON, err := json.Marshal(response); err == nil {
-			s.logger.WithFields(map[string]interface{}{
-				"raw_response": string(responseJSON),
-				"mcp_method":   mcpReq.Method,
-				"mcp_id":       mcpReq.ID,
-			}).Info("MCP response detail (LOG_LEVEL=1)")
-		}
-	}
-
-	s.writeMCPResponse(w, response)
-}
-
-// Session management helpers
-
-// generateSessionID creates a new unique session ID
-func (s *Server) generateSessionID() string {
-	// Use timestamp + random component for uniqueness
-	return fmt.Sprintf("mcp-session-%d-%d", time.Now().UnixNano(), time.Now().Unix()%10000)
-}
-
-// getOrCreateSession returns existing session ID from header, or creates new one
-func (s *Server) getOrCreateSession(r *http.Request) string {
-	// Check if client sent session ID
-	if sessionID := r.Header.Get("Mcp-Session-Id"); sessionID != "" {
-		s.sessionMutex.RLock()
-		_, exists := s.mcpSessions[sessionID]
-		s.sessionMutex.RUnlock()
-
-		if exists {
-			return sessionID
-		}
-	}
-
-	// Create new session
-	sessionID := s.generateSessionID()
-	s.sessionMutex.Lock()
-	s.mcpSessions[sessionID] = time.Now()
-	s.sessionMutex.Unlock()
-
-	s.logger.WithField("session_id", sessionID).Debug("Created new MCP session")
-	return sessionID
-}
-
-
-// handleMCPInitialize handles MCP initialization
-func (s *Server) handleMCPInitialize(req MCPRequest) MCPResponse {
-	// Parse client's requested protocol version
-	var clientVersion string
-	if params, ok := req.Params.(map[string]interface{}); ok {
-		if version, ok := params["protocolVersion"].(string); ok {
-			clientVersion = version
-			s.logger.WithFields(map[string]interface{}{
-				"client_version": clientVersion,
-			}).Info("Client requested MCP protocol version")
-		}
-	}
-
-	// Respond with our supported version (2025-06-18)
-	result := map[string]interface{}{
-		"protocolVersion": "2025-06-18",
-		"capabilities": map[string]interface{}{
-			"tools": map[string]interface{}{},
-		},
-		"serverInfo": map[string]interface{}{
-			"name":    "nomad-build-service",
-			"version": "2.0.0",
-		},
-	}
-	return NewMCPResponse(req.ID, result)
-}
-
-// handleMCPPing handles ping requests for keep-alive
-func (s *Server) handleMCPPing(req MCPRequest) MCPResponse {
-	result := map[string]interface{}{
-		"status": "pong",
-	}
-	return NewMCPResponse(req.ID, result)
-}
-
-// handleMCPToolsList handles tools/list requests
-func (s *Server) handleMCPToolsList(req MCPRequest) MCPResponse {
-	tools := GetTools()
-	result := ToolListResult{Tools: tools}
-	return NewMCPResponse(req.ID, result)
-}
-
-// handleMCPToolsCall handles tools/call requests by translating to internal API
-func (s *Server) handleMCPToolsCall(req MCPRequest) MCPResponse {
-	params, ok := req.Params.(map[string]interface{})
-	if !ok {
-		return NewMCPErrorResponse(req.ID, MCPErrorInvalidParams, "Invalid params", nil)
-	}
-
-	toolName, ok := params["name"].(string)
-	if !ok {
-		return NewMCPErrorResponse(req.ID, MCPErrorInvalidParams, "Tool name required", nil)
-	}
-
-	arguments, ok := params["arguments"].(map[string]interface{})
-	if !ok {
-		arguments = make(map[string]interface{})
-	}
-
-	// Log the tool call with arguments for debugging
-	s.logger.WithFields(map[string]interface{}{
-		"tool_name": toolName,
-		"arguments": arguments,
-	}).Debug("MCP tool call received")
-
-	var response MCPResponse
-	switch toolName {
-	case "submitJob":
-		response = s.mcpSubmitJob(req.ID, arguments)
-	case "getStatus":
-		response = s.mcpGetStatus(req.ID, arguments)
-	case "getLogs":
-		response = s.mcpGetLogs(req.ID, arguments)
-	case "killJob":
-		response = s.mcpKillJob(req.ID, arguments)
-	case "cleanup":
-		response = s.mcpCleanup(req.ID, arguments)
-	case "getHistory":
-		response = s.mcpGetHistory(req.ID, arguments)
-	case "purgeFailedJob":
-		response = s.mcpPurgeFailedJob(req.ID, arguments)
-	case "pruneStorage":
-		response = s.mcpPruneStorage(req.ID, arguments)
-	case "cleanupBuildahCache":
-		response = s.mcpCleanupBuildahCache(req.ID, arguments)
-	default:
-		response = NewMCPErrorResponse(req.ID, MCPErrorMethodNotFound, "Tool not found", toolName)
-	}
-
-	// Log the response for debugging
-	if response.Error != nil {
-		s.logger.WithFields(map[string]interface{}{
-			"tool_name": toolName,
-			"error":     response.Error,
-		}).Warn("MCP tool call failed")
-	} else {
-		s.logger.WithFields(map[string]interface{}{
-			"tool_name": toolName,
-			"result":    response.Result,
-		}).Debug("MCP tool call succeeded")
-	}
-
-	return response
-}
-
-// MCP Tool implementations (translate to existing internal methods)
-
-func (s *Server) mcpSubmitJob(id interface{}, args map[string]interface{}) MCPResponse {
-	// Convert MCP arguments to internal job config
-	var jobConfig types.JobConfig
-
-	if owner, ok := args["owner"].(string); ok {
-		jobConfig.Owner = owner
-	}
-	if repoURL, ok := args["repo_url"].(string); ok {
-		jobConfig.RepoURL = repoURL
-	}
-	if gitRef, ok := args["git_ref"].(string); ok {
-		jobConfig.GitRef = gitRef
-	} else {
-		jobConfig.GitRef = "main"
-	}
-	if gitCreds, ok := args["git_credentials_path"].(string); ok {
-		jobConfig.GitCredentialsPath = gitCreds
-	} else {
-		jobConfig.GitCredentialsPath = "secret/nomad/jobs/git-credentials"
-	}
-	if dockerfile, ok := args["dockerfile_path"].(string); ok {
-		jobConfig.DockerfilePath = dockerfile
-	} else {
-		jobConfig.DockerfilePath = "Dockerfile"
-	}
-	if imageName, ok := args["image_name"].(string); ok {
-		jobConfig.ImageName = imageName
-	}
-	if regURL, ok := args["registry_url"].(string); ok {
-		jobConfig.RegistryURL = regURL
-	}
-	if regCreds, ok := args["registry_credentials_path"].(string); ok {
-		jobConfig.RegistryCredentialsPath = regCreds
-	} else {
-		jobConfig.RegistryCredentialsPath = "secret/nomad/jobs/registry-credentials"
-	}
-
-	// Convert image tags - handle multiple formats for compatibility
-	if tagsValue, exists := args["image_tags"]; exists {
-		// Try as array first (proper format)
-		if tagsArray, ok := tagsValue.([]interface{}); ok {
-			for _, tag := range tagsArray {
-				if tagStr, ok := tag.(string); ok {
-					jobConfig.ImageTags = append(jobConfig.ImageTags, tagStr)
-				}
-			}
-		} else if tagsString, ok := tagsValue.(string); ok {
-			// Handle string formats
-			if strings.HasPrefix(tagsString, "[") {
-				// Parse JSON array string like "[\"latest\", \"v1.0\"]"
-				var parsedTags []string
-				if err := json.Unmarshal([]byte(tagsString), &parsedTags); err == nil {
-					jobConfig.ImageTags = parsedTags
-				} else {
-					s.logger.WithError(err).Warn("Failed to parse image_tags JSON string")
-				}
-			} else {
-				// Treat as single tag
-				jobConfig.ImageTags = []string{tagsString}
-			}
-		}
-	}
-
-	// Parse test configuration
-	if testInterface, ok := args["test"]; ok {
-		if testMap, ok := testInterface.(map[string]interface{}); ok {
-			testConfig := &types.TestConfig{}
-
-			// Parse test commands
-			if cmdsInterface, ok := testMap["commands"].([]interface{}); ok {
-				for _, cmd := range cmdsInterface {
-					if cmdStr, ok := cmd.(string); ok {
-						testConfig.Commands = append(testConfig.Commands, cmdStr)
-					}
-				}
-			}
-
-			// Parse test entry point
-			if entryPoint, ok := testMap["entry_point"].(bool); ok {
-				testConfig.EntryPoint = entryPoint
-			}
-
-			// Parse test environment variables
-			if envInterface, ok := testMap["env"].(map[string]interface{}); ok {
-				testConfig.Env = make(map[string]string)
-				for key, value := range envInterface {
-					if valueStr, ok := value.(string); ok {
-						testConfig.Env[key] = valueStr
-					}
-				}
-			}
-
-			// Parse test resource limits
-			if limitsInterface, ok := testMap["resource_limits"]; ok {
-				if limitsMap, ok := limitsInterface.(map[string]interface{}); ok {
-					limits := &types.PhaseResourceLimits{}
-					if cpu, ok := limitsMap["cpu"].(string); ok {
-						limits.CPU = cpu
-					}
-					if memory, ok := limitsMap["memory"].(string); ok {
-						limits.Memory = memory
-					}
-					if disk, ok := limitsMap["disk"].(string); ok {
-						limits.Disk = disk
-					}
-					testConfig.ResourceLimits = limits
-				}
-			}
-
-			// Parse vault secrets
-			if vaultSecretsInterface, ok := testMap["vault_secrets"].([]interface{}); ok {
-				for _, secretInterface := range vaultSecretsInterface {
-					if secretMap, ok := secretInterface.(map[string]interface{}); ok {
-						vaultSecret := types.VaultSecret{}
-						if path, ok := secretMap["path"].(string); ok {
-							vaultSecret.Path = path
-						}
-						if fieldsInterface, ok := secretMap["fields"].(map[string]interface{}); ok {
-							vaultSecret.Fields = make(map[string]string)
-							for key, value := range fieldsInterface {
-								if valueStr, ok := value.(string); ok {
-									vaultSecret.Fields[key] = valueStr
-								}
-							}
-						}
-						testConfig.VaultSecrets = append(testConfig.VaultSecrets, vaultSecret)
-					}
-				}
-			}
-
-			// Parse vault policies
-			if vaultPoliciesInterface, ok := testMap["vault_policies"].([]interface{}); ok {
-				for _, policy := range vaultPoliciesInterface {
-					if policyStr, ok := policy.(string); ok {
-						testConfig.VaultPolicies = append(testConfig.VaultPolicies, policyStr)
-					}
-				}
-			}
-
-			jobConfig.Test = testConfig
-		}
-	}
-
-	// Parse resource limits
-	if resourceLimitsInterface, ok := args["resource_limits"]; ok {
-		resourceLimits := parseResourceLimitsFromMCP(resourceLimitsInterface)
-		jobConfig.ResourceLimits = resourceLimits
-	}
-
-	// Parse webhook configuration
-	if webhookURL, ok := args["webhook_url"].(string); ok {
-		jobConfig.WebhookURL = webhookURL
-	}
-	if webhookSecret, ok := args["webhook_secret"].(string); ok {
-		jobConfig.WebhookSecret = webhookSecret
-	}
-	if webhookOnSuccess, ok := args["webhook_on_success"].(bool); ok {
-		jobConfig.WebhookOnSuccess = webhookOnSuccess
-	}
-	if webhookOnFailure, ok := args["webhook_on_failure"].(bool); ok {
-		jobConfig.WebhookOnFailure = webhookOnFailure
-	}
-
-	// Parse webhook headers
-	if headersInterface, ok := args["webhook_headers"].(map[string]interface{}); ok {
-		jobConfig.WebhookHeaders = make(map[string]string)
-		for key, value := range headersInterface {
-			if valueStr, ok := value.(string); ok {
-				jobConfig.WebhookHeaders[key] = valueStr
-			}
-		}
-	}
-
-	// Validate job config using the same validation as web interface
-	if err := validateJobConfig(&jobConfig); err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Job configuration validation failed", err.Error())
-	}
-
-	// Check per-owner concurrent build limit
-	if err := s.checkOwnerBuildLimit(jobConfig.Owner); err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Too many concurrent builds", err.Error())
-	}
-
-	// Create job using existing logic
-	job, err := s.nomadClient.CreateJob(&jobConfig)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to create job", err.Error())
-	}
-
-	// Store job
-	if err := s.storage.StoreJob(job); err != nil {
-		s.logger.WithError(err).Warn("Failed to store job in storage")
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPJSONContent(map[string]interface{}{
-			"job_id": job.ID,
-			"status": job.Status,
-		}),
-	}
-	return NewMCPResponse(id, result)
-}
-
-func (s *Server) mcpGetStatus(id interface{}, args map[string]interface{}) MCPResponse {
-	jobID, ok := args["job_id"].(string)
-	if !ok {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "job_id required", nil)
-	}
-
-	job, err := s.storage.GetJob(jobID)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Job not found", err.Error())
-	}
-
-	// Update status from Nomad
-	if updatedJob, err := s.nomadClient.UpdateJobStatus(job); err == nil {
-		job = updatedJob
-		s.storage.UpdateJob(job) // Update storage
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPJSONContent(map[string]interface{}{
-			"job_id": job.ID,
-			"status": job.Status,
-			"error":  job.Error,
-			"phase":  job.FailedPhase,
-		}),
-	}
-	return NewMCPResponse(id, result)
-}
-
-func (s *Server) mcpGetLogs(id interface{}, args map[string]interface{}) MCPResponse {
-	jobID, ok := args["job_id"].(string)
-	if !ok {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "job_id required", nil)
-	}
-
-	job, err := s.storage.GetJob(jobID)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Job not found", err.Error())
-	}
-
-	logs, err := s.nomadClient.GetJobLogs(job)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to get logs", err.Error())
-	}
-
-	phase, _ := args["phase"].(string)
-	var result interface{}
-	
-	switch phase {
-	case "build":
-		result = logs.Build
-	case "test":
-		result = logs.Test
-	case "publish":
-		result = logs.Publish
-	default:
-		result = logs
-	}
-
-	toolResult := ToolCallResult{
-		Content: NewMCPJSONContent(result),
-	}
-	return NewMCPResponse(id, toolResult)
-}
-
-func (s *Server) mcpKillJob(id interface{}, args map[string]interface{}) MCPResponse {
-	jobID, ok := args["job_id"].(string)
-	if !ok {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "job_id required", nil)
-	}
-
-	job, err := s.storage.GetJob(jobID)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Job not found", err.Error())
-	}
-
-	if err := s.nomadClient.KillJob(job); err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to kill job", err.Error())
-	}
-
-	// Update job status
-	job.Status = types.StatusFailed
-	job.Error = "Job killed by user"
-	s.storage.UpdateJob(job)
-
-	result := ToolCallResult{
-		Content: NewMCPTextContent("Job terminated successfully"),
-	}
-	return NewMCPResponse(id, result)
-}
-
-func (s *Server) mcpCleanup(id interface{}, args map[string]interface{}) MCPResponse {
-	jobID, ok := args["job_id"].(string)
-	if !ok {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "job_id required", nil)
-	}
-
-	job, err := s.storage.GetJob(jobID)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Job not found", err.Error())
-	}
-
-	if err := s.nomadClient.CleanupJob(job); err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to cleanup job", err.Error())
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPTextContent("Job resources cleaned up successfully"),
-	}
-	return NewMCPResponse(id, result)
-}
-
-func (s *Server) mcpGetHistory(id interface{}, args map[string]interface{}) MCPResponse {
-	limit := 10
-	if limitFloat, ok := args["limit"].(float64); ok {
-		limit = int(limitFloat)
-	}
-	
-	offset := 0 // Default offset for MCP interface
-
-	history, total, err := s.storage.GetJobHistory(limit, offset)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to get history", err.Error())
-	}
-	
-	// Filter by owner if specified (post-filtering for simplicity)
-	if ownerFilter, ok := args["owner"].(string); ok && ownerFilter != "" {
-		var filteredHistory []types.JobHistory
-		for _, job := range history {
-			if job.Config.Owner == ownerFilter {
-				filteredHistory = append(filteredHistory, job)
-			}
-		}
-		history = filteredHistory
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPJSONContent(map[string]interface{}{
-			"jobs":  history,
-			"total": total,
-		}),
-	}
-	return NewMCPResponse(id, result)
-}
-
-func (s *Server) mcpPurgeFailedJob(id interface{}, args map[string]interface{}) MCPResponse {
-	jobID, ok := args["job_id"].(string)
-	if !ok {
-		return NewMCPErrorResponse(id, MCPErrorInvalidParams, "job_id required", nil)
-	}
-
-	job, err := s.storage.GetJob(jobID)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Job not found", err.Error())
-	}
-
-	// Use the new CleanupFailedJobs method to purge from Nomad
-	if err := s.nomadClient.CleanupFailedJobs(job); err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to purge job from Nomad", err.Error())
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPTextContent(fmt.Sprintf("Job %s purged successfully from Nomad", jobID)),
-	}
-	return NewMCPResponse(id, result)
-}
-
 // handlePruneStorage handles storage prune requests
 func (s *Server) handlePruneStorage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1762,63 +1068,6 @@ func (s *Server) handlePruneJobStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSONResponse(w, response)
-}
-
-// mcpPruneStorage handles the MCP pruneStorage tool call
-func (s *Server) mcpPruneStorage(id interface{}, args map[string]interface{}) MCPResponse {
-	req := types.PruneStorageRequest{}
-
-	if project, ok := args["project"].(string); ok {
-		req.Project = project
-	}
-	if all, ok := args["all"].(bool); ok {
-		req.All = all
-	}
-	if allNodes, ok := args["all_nodes"].(bool); ok {
-		req.AllNodes = allNodes
-	}
-	if dryRun, ok := args["dry_run"].(bool); ok {
-		req.DryRun = dryRun
-	}
-	if force, ok := args["force"].(bool); ok {
-		req.Force = force
-	}
-
-	// Safety check: warn about active builds
-	var warnings []string
-	if !req.Force {
-		activeBuilds, err := s.nomadClient.CheckActiveBuildJobs()
-		if err != nil {
-			s.logger.WithError(err).Warn("Failed to check for active build jobs")
-		} else if len(activeBuilds) > 0 {
-			warnings = append(warnings, fmt.Sprintf("Warning: %d active build job(s) detected", len(activeBuilds)))
-			if !req.DryRun && req.All {
-				return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Cannot perform aggressive prune with active builds",
-					fmt.Sprintf("%d active build(s) detected. Use force=true to override.", len(activeBuilds)))
-			}
-		}
-	}
-
-	// Submit prune job
-	pruneJobID, err := s.nomadClient.RunPruneStorage(&req)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to submit prune storage job", err.Error())
-	}
-
-	message := "Prune storage job submitted successfully"
-	if req.DryRun {
-		message = "Prune storage job submitted in dry-run mode (no actual deletions)"
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPJSONContent(map[string]interface{}{
-			"success":  true,
-			"job_id":   pruneJobID,
-			"message":  message,
-			"warnings": warnings,
-		}),
-	}
-	return NewMCPResponse(id, result)
 }
 
 // handleCleanupBuildahCache handles cleanup buildah cache requests
@@ -1932,72 +1181,6 @@ func (s *Server) handleCleanupCacheJobStatus(w http.ResponseWriter, r *http.Requ
 	s.writeJSONResponse(w, response)
 }
 
-// mcpCleanupBuildahCache handles the MCP cleanupBuildahCache tool call
-func (s *Server) mcpCleanupBuildahCache(id interface{}, args map[string]interface{}) MCPResponse {
-	req := types.CleanupBuildahCacheRequest{}
-
-	if nodeName, ok := args["node_name"].(string); ok {
-		req.NodeName = nodeName
-	}
-	if allNodes, ok := args["all_nodes"].(bool); ok {
-		req.AllNodes = allNodes
-	}
-	if full, ok := args["full"].(bool); ok {
-		req.Full = full
-	}
-	if dryRun, ok := args["dry_run"].(bool); ok {
-		req.DryRun = dryRun
-	}
-	if force, ok := args["force"].(bool); ok {
-		req.Force = force
-	}
-
-	// Safety check: warn about active builds
-	var warnings []string
-	if !req.Force {
-		activeBuilds, err := s.nomadClient.CheckActiveBuildJobs()
-		if err != nil {
-			s.logger.WithError(err).Warn("Failed to check for active build jobs")
-		} else if len(activeBuilds) > 0 {
-			warnings = append(warnings, fmt.Sprintf("Warning: %d active build job(s) detected", len(activeBuilds)))
-			if !req.DryRun && req.Full {
-				return NewMCPErrorResponse(id, MCPErrorInvalidParams, "Cannot perform full reset with active builds",
-					fmt.Sprintf("%d active build(s) detected. Use force=true to override.", len(activeBuilds)))
-			}
-		}
-	}
-
-	// Submit cleanup job
-	cleanupJobID, err := s.nomadClient.RunCleanupBuildahCache(&req)
-	if err != nil {
-		return NewMCPErrorResponse(id, MCPErrorInternalError, "Failed to submit cleanup buildah cache job", err.Error())
-	}
-
-	message := "Cleanup buildah cache job submitted successfully"
-	if req.DryRun {
-		message = "Cleanup buildah cache job submitted in dry-run mode (no actual changes)"
-	}
-
-	result := ToolCallResult{
-		Content: NewMCPJSONContent(map[string]interface{}{
-			"success":  true,
-			"job_id":   cleanupJobID,
-			"message":  message,
-			"warnings": warnings,
-		}),
-	}
-	return NewMCPResponse(id, result)
-}
-
-// Helper method to write MCP responses
-func (s *Server) writeMCPResponse(w http.ResponseWriter, response MCPResponse) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.WithError(err).Error("Failed to encode MCP response")
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	}
-}
-
 // validateJobConfig validates the job configuration and returns an error if validation fails
 func validateJobConfig(config *types.JobConfig) error {
 	// Required fields
@@ -2072,90 +1255,17 @@ func validateJobConfig(config *types.JobConfig) error {
 	return nil
 }
 
-// parseResourceLimitsFromMCP converts the MCP resource_limits argument to internal types
-func parseResourceLimitsFromMCP(limitsInterface interface{}) *types.ResourceLimits {
-	limitsMap, ok := limitsInterface.(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	resourceLimits := &types.ResourceLimits{}
-
-	// Parse legacy global limits
-	if cpu, ok := limitsMap["cpu"].(string); ok {
-		resourceLimits.CPU = cpu
-	}
-	if memory, ok := limitsMap["memory"].(string); ok {
-		resourceLimits.Memory = memory
-	}
-	if disk, ok := limitsMap["disk"].(string); ok {
-		resourceLimits.Disk = disk
-	}
-
-	// Parse per-phase limits
-	if buildInterface, ok := limitsMap["build"]; ok {
-		if buildMap, ok := buildInterface.(map[string]interface{}); ok {
-			build := &types.PhaseResourceLimits{}
-			if cpu, ok := buildMap["cpu"].(string); ok {
-				build.CPU = cpu
-			}
-			if memory, ok := buildMap["memory"].(string); ok {
-				build.Memory = memory
-			}
-			if disk, ok := buildMap["disk"].(string); ok {
-				build.Disk = disk
-			}
-			resourceLimits.Build = build
-		}
-	}
-
-	if testInterface, ok := limitsMap["test"]; ok {
-		if testMap, ok := testInterface.(map[string]interface{}); ok {
-			test := &types.PhaseResourceLimits{}
-			if cpu, ok := testMap["cpu"].(string); ok {
-				test.CPU = cpu
-			}
-			if memory, ok := testMap["memory"].(string); ok {
-				test.Memory = memory
-			}
-			if disk, ok := testMap["disk"].(string); ok {
-				test.Disk = disk
-			}
-			resourceLimits.Test = test
-		}
-	}
-
-	if publishInterface, ok := limitsMap["publish"]; ok {
-		if publishMap, ok := publishInterface.(map[string]interface{}); ok {
-			publish := &types.PhaseResourceLimits{}
-			if cpu, ok := publishMap["cpu"].(string); ok {
-				publish.CPU = cpu
-			}
-			if memory, ok := publishMap["memory"].(string); ok {
-				publish.Memory = memory
-			}
-			if disk, ok := publishMap["disk"].(string); ok {
-				publish.Disk = disk
-			}
-			resourceLimits.Publish = publish
-		}
-	}
-
-	return resourceLimits
-}
-
 // handleJobResource handles RESTful job resource endpoints
 // Routes: GET /json/job/{jobID}/status, GET /json/job/{jobID}/logs,
 //         GET /json/job/{jobID}/test-endpoint, POST /json/job/{jobID}/test-result
 func (s *Server) handleJobResource(w http.ResponseWriter, r *http.Request) {
-	// Parse URL path: /json/job/{jobID}/{resource} or /mcp/job/{jobID}/{resource}
+	// Parse URL path: /json/job/{jobID}/{resource}
 	path := r.URL.Path
 	path = strings.TrimPrefix(path, "/json/job/")
-	path = strings.TrimPrefix(path, "/mcp/job/")
 	parts := strings.Split(path, "/")
 
 	if len(parts) != 2 {
-		http.Error(w, "Invalid path format. Expected: /mcp/job/{jobID}/{status|logs|test-endpoint|test-result}", http.StatusBadRequest)
+		http.Error(w, "Invalid path format. Expected: /json/job/{jobID}/{status|logs|test-endpoint|test-result}", http.StatusBadRequest)
 		return
 	}
 
@@ -2197,7 +1307,7 @@ func (s *Server) handleJobResource(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleJobStatus handles GET /mcp/job/{jobID}/status
+// handleJobStatus handles GET /json/job/{jobID}/status
 func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request, jobID string) {
 	startTime := time.Now()
 	
@@ -2287,7 +1397,7 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request, jobID s
 	}).Info("REST API status request completed")
 }
 
-// handleJobLogs handles GET /mcp/job/{jobID}/logs
+// handleJobLogs handles GET /json/job/{jobID}/logs
 func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request, jobID string) {
 	startTime := time.Now()
 	
@@ -2378,7 +1488,7 @@ func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request, jobID str
 	}).Info("REST API logs request completed")
 }
 
-// handleGetTestEndpoint handles GET /mcp/job/{jobID}/test-endpoint
+// handleGetTestEndpoint handles GET /json/job/{jobID}/test-endpoint
 // Returns the external test container's endpoint information for CLI to connect to
 func (s *Server) handleGetTestEndpoint(w http.ResponseWriter, r *http.Request, jobID string) {
 	startTime := time.Now()
@@ -2453,7 +1563,7 @@ func (s *Server) handleGetTestEndpoint(w http.ResponseWriter, r *http.Request, j
 	s.writeJSONResponse(w, response)
 }
 
-// handleReportTestResult handles POST /mcp/job/{jobID}/test-result
+// handleReportTestResult handles POST /json/job/{jobID}/test-result
 // Receives test results from CLI after running external python tests
 func (s *Server) handleReportTestResult(w http.ResponseWriter, r *http.Request, jobID string) {
 	startTime := time.Now()

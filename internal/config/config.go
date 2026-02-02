@@ -161,7 +161,7 @@ func Load() (*Config, error) {
 		},
 		Logging: LoggingConfig{
 			Level:        getEnv("LOG_LEVEL", "info"),
-			LogLevel:     getEnvInt("MCP_LOG_LEVEL", 0),
+			LogLevel:     getEnvInt("API_LOG_LEVEL", 0),
 			LogJobSpecs:  getEnvBool("LOG_JOB_SPECS", false),
 			LogHCLFormat: getEnvBool("LOG_HCL_FORMAT", false),
 		},

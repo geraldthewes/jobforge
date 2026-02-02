@@ -89,7 +89,7 @@ cache/
 test-build
 nomad-build-service
 jobforge
-server
+/server
 
 # Development tools
 .serena/

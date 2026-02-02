@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	
+
 	"nomad-mcp-builder/internal/config"
-	"nomad-mcp-builder/internal/mcp"
 	"nomad-mcp-builder/internal/metrics"
 	"nomad-mcp-builder/internal/nomad"
+	"nomad-mcp-builder/internal/server"
 	"nomad-mcp-builder/internal/storage"
 )
 
@@ -95,9 +95,9 @@ func main() {
 		go startHealthMonitoring(consulStorage, nomadClient, metricsServer, logger)
 	}
 	
-	// Initialize MCP server with configured logger
-	mcpServer := mcp.NewServer(cfg, nomadClient, consulStorage, logger)
-	
+	// Initialize API server with configured logger
+	apiServer := server.NewServer(cfg, nomadClient, consulStorage, logger)
+
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -109,12 +109,12 @@ func main() {
 	// Start servers
 	var wg sync.WaitGroup
 	
-	// Start MCP server
+	// Start API server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := mcpServer.Start(ctx); err != nil {
-			logger.WithError(err).Error("MCP server failed")
+		if err := apiServer.Start(ctx); err != nil {
+			logger.WithError(err).Error("API server failed")
 		}
 	}()
 	

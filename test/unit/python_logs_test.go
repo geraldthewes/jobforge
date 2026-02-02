@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// extractPythonTestOutput mirrors the function in internal/mcp/server.go
+// extractPythonTestOutput mirrors the function in internal/server/server.go
 // for testing purposes. This ensures the logic is correct.
 func extractPythonTestOutput(logs []string) []string {
 	var pythonOutput []string
