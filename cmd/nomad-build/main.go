@@ -192,6 +192,9 @@ EXAMPLES:
     # List locks for a specific owner
     jobforge list-locks --owner gerald
 
+    # List locks with full details (no truncation)
+    jobforge list-locks --no-trunc
+
     # Force unlock a specific lock
     jobforge force-unlock image-registry.cluster-5000-myapp-main
 
@@ -1388,6 +1391,7 @@ func displayFailedJobLogs(c *client.Client, jobID string, failedPhase string) er
 func handleListLocks(c *client.Client, args []string) error {
 	var staleOnly bool
 	var owner string
+	var noTrunc bool
 
 	// Parse flags
 	i := 0
@@ -1395,6 +1399,9 @@ func handleListLocks(c *client.Client, args []string) error {
 		arg := args[i]
 		if arg == "--stale-only" {
 			staleOnly = true
+			i++
+		} else if arg == "--no-trunc" {
+			noTrunc = true
 			i++
 		} else if arg == "--owner" {
 			if i+1 >= len(args) {
@@ -1419,17 +1426,47 @@ func handleListLocks(c *client.Client, args []string) error {
 
 	// Print header
 	fmt.Printf("Build Locks (Total: %d, Stale: %d)\n", response.TotalCount, response.StaleCount)
-	fmt.Println(strings.Repeat("-", 115))
 
 	if len(response.Locks) == 0 {
+		fmt.Println(strings.Repeat("-", 130))
 		fmt.Println("No locks found.")
 		return nil
 	}
 
+	if noTrunc {
+		// No truncation - print each lock with full details
+		fmt.Println(strings.Repeat("-", 130))
+		for i, lock := range response.Locks {
+			if i > 0 {
+				fmt.Println()
+			}
+			staleStr := "No"
+			if lock.IsStale {
+				staleStr = "Yes"
+				if lock.StaleReason != "" {
+					staleStr = fmt.Sprintf("Yes (%s)", lock.StaleReason)
+				}
+			}
+			fmt.Printf("Lock Key:  %s\n", lock.LockKey)
+			fmt.Printf("Job ID:    %s\n", lock.JobID)
+			fmt.Printf("Owner:     %s\n", lock.Owner)
+			fmt.Printf("Image:     %s\n", lock.ImageName)
+			fmt.Printf("Git Ref:   %s\n", lock.GitRef)
+			fmt.Printf("Registry:  %s\n", lock.RegistryURL)
+			fmt.Printf("Phase:     %s\n", lock.Phase)
+			fmt.Printf("Age:       %s\n", formatDuration(lock.Age))
+			fmt.Printf("Stale:     %s\n", staleStr)
+		}
+		return nil
+	}
+
+	// Table format with truncation
+	fmt.Println(strings.Repeat("-", 130))
+
 	// Print table header
-	fmt.Printf("%-45s %-12s %-10s %-15s %-10s %-10s %-5s\n",
+	fmt.Printf("%-60s %-12s %-10s %-15s %-10s %-10s %-5s\n",
 		"LOCK KEY", "JOB ID", "OWNER", "IMAGE", "PHASE", "AGE", "STALE")
-	fmt.Println(strings.Repeat("-", 115))
+	fmt.Println(strings.Repeat("-", 130))
 
 	for _, lock := range response.Locks {
 		jobID := lock.JobID
@@ -1442,10 +1479,8 @@ func handleListLocks(c *client.Client, args []string) error {
 			imageName = imageName[:15]
 		}
 
+		// Show full lock key - this is critical for force-unlock command
 		lockKey := lock.LockKey
-		if len(lockKey) > 45 {
-			lockKey = lockKey[:45]
-		}
 
 		ownerStr := lock.Owner
 		if len(ownerStr) > 10 {
@@ -1467,7 +1502,7 @@ func handleListLocks(c *client.Client, args []string) error {
 			}
 		}
 
-		fmt.Printf("%-45s %-12s %-10s %-15s %-10s %-10s %s\n",
+		fmt.Printf("%-60s %-12s %-10s %-15s %-10s %-10s %s\n",
 			lockKey, jobID, ownerStr, imageName, phaseStr, ageStr, staleStr)
 	}
 
