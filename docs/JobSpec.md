@@ -113,7 +113,7 @@ The `gpu_compute_capability` field allows specifying a minimum GPU architecture 
 | 8.6 | Ampere | RTX 3080, RTX 3090 |
 | 8.9 | Ada Lovelace | RTX 4090, RTX 4080 |
 
-**Node Setup**: Nomad nodes with GPUs must have `meta.gpu_compute_capability` set in their client configuration:
+**Node Setup**: To use this constraint, Nomad nodes with GPUs should have `meta.gpu_compute_capability` configured:
 ```hcl
 client {
   meta {
