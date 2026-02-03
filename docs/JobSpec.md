@@ -79,6 +79,7 @@ For GPU-accelerated workloads or specific node targeting, additional test config
 | `test.gpu_required` | boolean | `false` | Enable NVIDIA GPU runtime and automatically constrain to GPU-capable nodes |
 | `test.gpu_count` | integer | `0` | **Deprecated** - GPU allocation is controlled via `NVIDIA_VISIBLE_DEVICES` env var |
 | `test.gpu_compute_capability` | string | - | Minimum GPU compute capability (e.g., "7.5" for Turing+). Requires nodes to have `meta.gpu_compute_capability` set. |
+| `test.gpu_node_pin` | string | - | Pin to a specific GPU node (e.g., "gpu005") for dedicated workloads. Bypasses shared/dedicated scheduling. |
 | `test.constraints` | array[Constraint] | `[]` | Custom Nomad node constraints for test job placement |
 
 **Constraint Type**:
@@ -113,51 +114,52 @@ The `gpu_compute_capability` field allows specifying a minimum GPU architecture 
 | 8.6 | Ampere | RTX 3080, RTX 3090 |
 | 8.9 | Ada Lovelace | RTX 4090, RTX 4080 |
 
-**Node Setup**: To use this constraint, Nomad nodes with GPUs should have `meta.gpu_compute_capability` configured:
+**Node Setup**: Nomad nodes with GPUs should have appropriate metadata configured:
 ```hcl
 client {
   meta {
     "gpu-capable" = "true"
     "gpu_compute_capability" = "7.5"  # For RTX 2080
+    "gpu-dedicated" = "true"          # Set only on dedicated GPU nodes
   }
 }
 ```
 
-**GPU Availability Check**:
+**GPU Node Scheduling**:
 
-When `gpu_required: true`, jobforge automatically adds a prestart task that checks GPU availability via Consul KV before running the test. This prevents CUDA OOM errors when another GPU job is already consuming the GPU on a node.
+GPU jobs are scheduled using static node metadata constraints, providing clean and predictable scheduling:
 
-- **How it works**: A prestart task checks if `gpu/occupied/<node-name>` exists in Consul KV
-- **If GPU is occupied**: The prestart task fails and Nomad reschedules to another node
-- **If GPU is available**: The test proceeds normally
-- **Reschedule policy**: GPU jobs get an enhanced reschedule policy (10 attempts over 30 minutes with exponential backoff)
+| Node Type | Nodes | `meta.gpu-dedicated` | Purpose |
+|-----------|-------|---------------------|---------|
+| Shared | gpu001, gpu003, gpu006, gpu007 | (not set) | General GPU jobs from jobforge |
+| Dedicated | gpu002, gpu005, gx10-d8ce | `"true"` | Reserved for ollama, nemotron, llama-swap |
 
-**Prerequisites for GPU Availability Check**:
+**How it works**:
+- When `gpu_required: true`, jobforge adds a constraint: `${meta.gpu-dedicated} != "true"`
+- This automatically excludes dedicated nodes and schedules on shared GPU nodes
+- No prestart tasks or Consul KV polling - just clean Nomad constraints
+- If you need to run on a dedicated node, use `gpu_node_pin` to override
 
-For this feature to work, GPU-consuming jobs (e.g., hunyuan-ocr, ML inference services) must set and clear Consul KV keys:
+**GPU Node Pinning**:
 
-```bash
-# At job start (in prestart hook or startup script):
-consul kv put gpu/occupied/$(hostname) "job-name"
+Use `gpu_node_pin` when you need to run a job on a specific GPU node:
 
-# At job end (in poststop hook or cleanup script):
-consul kv delete gpu/occupied/$(hostname)
+```yaml
+test:
+  entry_point: true
+  gpu_required: true
+  gpu_node_pin: "gpu005"  # Run specifically on gpu005
 ```
 
-Example Nomad job hook for GPU occupation:
-```hcl
-task "main" {
-  lifecycle {
-    hook = "prestart"
-    sidecar = false
-  }
-  driver = "exec"
-  config {
-    command = "/bin/sh"
-    args    = ["-c", "consul kv put gpu/occupied/${node.unique.name} ${NOMAD_JOB_NAME}"]
-  }
-}
-```
+When `gpu_node_pin` is set:
+- The job is pinned to the specified node via `${node.unique.name} = "<node-name>"`
+- The `gpu-dedicated` exclusion constraint is NOT added (since you're explicitly choosing the node)
+- The `gpu-capable` constraint is still added
+
+**Use cases for node pinning**:
+- Testing with specific GPU hardware configurations
+- Running on dedicated nodes with special permissions
+- Debugging node-specific issues
 
 **Examples**:
 

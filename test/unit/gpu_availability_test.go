@@ -1,11 +1,8 @@
 package unit
 
 import (
-	"strings"
 	"testing"
 	"time"
-
-	nomadapi "github.com/hashicorp/nomad/api"
 
 	"nomad-mcp-builder/internal/config"
 	"nomad-mcp-builder/internal/nomad"
@@ -57,9 +54,8 @@ func createTestClient(t *testing.T) *nomad.Client {
 	return client
 }
 
-// TestGPUAvailabilityCheckTaskStructure tests that the GPU availability check task
-// has the correct structure (name, driver, lifecycle hook)
-func TestGPUAvailabilityCheckTaskStructure(t *testing.T) {
+// TestGPUDedicatedExclusionConstraint tests that GPU jobs have the gpu-dedicated exclusion constraint
+func TestGPUDedicatedExclusionConstraint(t *testing.T) {
 	client := createTestClient(t)
 
 	// Create a GPU job configuration
@@ -92,52 +88,98 @@ func TestGPUAvailabilityCheckTaskStructure(t *testing.T) {
 		t.Fatal("Expected at least one test job")
 	}
 
-	// Check that GPU availability check task exists
+	// Check constraints on the job
 	testJobSpec := testJobs[0]
-	taskGroup := testJobSpec.TaskGroups[0]
+	constraints := testJobSpec.TaskGroups[0].Constraints
 
-	if len(taskGroup.Tasks) < 2 {
-		t.Fatalf("Expected at least 2 tasks (gpu-availability-check + main), got %d", len(taskGroup.Tasks))
-	}
+	// Should have both gpu-capable and gpu-dedicated exclusion constraints
+	var hasGPUCapable, hasGPUDedicatedExclusion bool
 
-	// GPU availability check should be the first task
-	gpuCheckTask := taskGroup.Tasks[0]
-
-	// Verify task name
-	if gpuCheckTask.Name != "gpu-availability-check" {
-		t.Errorf("Expected task name 'gpu-availability-check', got '%s'", gpuCheckTask.Name)
-	}
-
-	// Verify driver
-	if gpuCheckTask.Driver != "exec" {
-		t.Errorf("Expected driver 'exec', got '%s'", gpuCheckTask.Driver)
+	for _, c := range constraints {
+		if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" && c.Operand == "=" {
+			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" && c.RTarget == "true" && c.Operand == "!=" {
+			hasGPUDedicatedExclusion = true
+		}
 	}
 
-	// Verify lifecycle hook
-	if gpuCheckTask.Lifecycle == nil {
-		t.Fatal("Expected lifecycle to be set")
-	}
-	if gpuCheckTask.Lifecycle.Hook != "prestart" {
-		t.Errorf("Expected lifecycle hook 'prestart', got '%s'", gpuCheckTask.Lifecycle.Hook)
-	}
-	if gpuCheckTask.Lifecycle.Sidecar {
-		t.Error("Expected sidecar to be false")
+	if !hasGPUCapable {
+		t.Error("Expected gpu-capable constraint to be present")
 	}
 
-	// Verify resources are minimal
-	if gpuCheckTask.Resources == nil {
-		t.Fatal("Expected resources to be set")
-	}
-	if *gpuCheckTask.Resources.CPU != 50 {
-		t.Errorf("Expected CPU 50, got %d", *gpuCheckTask.Resources.CPU)
-	}
-	if *gpuCheckTask.Resources.MemoryMB != 32 {
-		t.Errorf("Expected MemoryMB 32, got %d", *gpuCheckTask.Resources.MemoryMB)
+	if !hasGPUDedicatedExclusion {
+		t.Error("Expected gpu-dedicated exclusion constraint (${meta.gpu-dedicated} != 'true') to be present")
 	}
 }
 
-// TestGPUAvailabilityCheckCommand tests that the check command includes Consul KV query pattern
-func TestGPUAvailabilityCheckCommand(t *testing.T) {
+// TestGPUNodePinConstraint tests that node pinning works instead of gpu-dedicated exclusion
+func TestGPUNodePinConstraint(t *testing.T) {
+	client := createTestClient(t)
+
+	jobConfig := types.JobConfig{
+		Owner:          "test-user",
+		RepoURL:        "https://github.com/test/repo.git",
+		GitRef:         "main",
+		DockerfilePath: "Dockerfile",
+		ImageName:      "test-image",
+		ImageTags:      []string{"latest"},
+		RegistryURL:    "registry.local:5000",
+		Test: &types.TestConfig{
+			EntryPoint:  true,
+			GPURequired: true,
+			GPUNodePin:  "gpu005", // Pin to specific node
+		},
+	}
+
+	job := &types.Job{
+		ID:     "test-job-node-pin",
+		Config: jobConfig,
+	}
+
+	testJobs, err := client.CreateTestJobSpecs(job, "")
+	if err != nil {
+		t.Fatalf("Failed to create test job specs: %v", err)
+	}
+
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
+	}
+
+	// Check constraints on the job
+	testJobSpec := testJobs[0]
+	constraints := testJobSpec.TaskGroups[0].Constraints
+
+	// Should have node pin constraint, NOT gpu-dedicated exclusion
+	var hasNodePin, hasGPUDedicatedExclusion bool
+	var nodePinValue string
+
+	for _, c := range constraints {
+		if c.LTarget == "${node.unique.name}" && c.Operand == "=" {
+			hasNodePin = true
+			nodePinValue = c.RTarget
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" && c.Operand == "!=" {
+			hasGPUDedicatedExclusion = true
+		}
+	}
+
+	if !hasNodePin {
+		t.Error("Expected node pin constraint (${node.unique.name} = 'gpu005') to be present")
+	}
+
+	if nodePinValue != "gpu005" {
+		t.Errorf("Expected node pin value 'gpu005', got '%s'", nodePinValue)
+	}
+
+	if hasGPUDedicatedExclusion {
+		t.Error("Expected gpu-dedicated exclusion constraint NOT to be present when node pin is set")
+	}
+}
+
+// TestNoGPUCheckTaskForGPUJobs tests that GPU jobs do NOT have a prestart gpu-availability-check task
+// (This is the new behavior - we use constraints instead)
+func TestNoGPUCheckTaskForGPUJobs(t *testing.T) {
 	client := createTestClient(t)
 
 	jobConfig := types.JobConfig{
@@ -155,7 +197,7 @@ func TestGPUAvailabilityCheckCommand(t *testing.T) {
 	}
 
 	job := &types.Job{
-		ID:     "test-job-456",
+		ID:     "test-job-no-prestart",
 		Config: jobConfig,
 	}
 
@@ -164,56 +206,33 @@ func TestGPUAvailabilityCheckCommand(t *testing.T) {
 		t.Fatalf("Failed to create test job specs: %v", err)
 	}
 
-	gpuCheckTask := testJobs[0].TaskGroups[0].Tasks[0]
-
-	// Verify config has command and args
-	command, ok := gpuCheckTask.Config["command"].(string)
-	if !ok {
-		t.Fatal("Expected command to be a string")
-	}
-	if command != "/bin/sh" {
-		t.Errorf("Expected command '/bin/sh', got '%s'", command)
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
 	}
 
-	args, ok := gpuCheckTask.Config["args"].([]string)
-	if !ok {
-		t.Fatal("Expected args to be a string slice")
-	}
-	if len(args) != 2 {
-		t.Fatalf("Expected 2 args, got %d", len(args))
-	}
-	if args[0] != "-c" {
-		t.Errorf("Expected first arg '-c', got '%s'", args[0])
+	// Should only have the main task, no gpu-availability-check prestart task
+	taskGroup := testJobs[0].TaskGroups[0]
+
+	if len(taskGroup.Tasks) != 1 {
+		t.Errorf("Expected exactly 1 task (main), got %d", len(taskGroup.Tasks))
 	}
 
-	checkScript := args[1]
-
-	// Verify the script contains the Consul KV pattern
-	if !strings.Contains(checkScript, "consul kv get gpu/occupied/") {
-		t.Error("Check script should contain 'consul kv get gpu/occupied/'")
+	if taskGroup.Tasks[0].Name != "main" {
+		t.Errorf("Expected task name 'main', got '%s'", taskGroup.Tasks[0].Name)
 	}
 
-	// Verify it uses node interpolation
-	if !strings.Contains(checkScript, "${node.unique.name}") {
-		t.Error("Check script should use ${node.unique.name} for node name")
-	}
-
-	// Verify it exits with error when GPU is occupied
-	if !strings.Contains(checkScript, "exit 1") {
-		t.Error("Check script should exit with code 1 when GPU is occupied")
-	}
-
-	// Verify it has a success message
-	if !strings.Contains(checkScript, "GPU available") {
-		t.Error("Check script should have a success message about GPU availability")
+	// Verify no gpu-availability-check task exists
+	for _, task := range taskGroup.Tasks {
+		if task.Name == "gpu-availability-check" {
+			t.Error("Expected no 'gpu-availability-check' task - we now use constraints instead")
+		}
 	}
 }
 
-// TestGPUCheckOnlyAddedWhenGPURequired tests that GPU check is only added when GPURequired=true
-func TestGPUCheckOnlyAddedWhenGPURequired(t *testing.T) {
+// TestNonGPUJobHasNoGPUConstraints tests that non-GPU jobs don't have GPU constraints
+func TestNonGPUJobHasNoGPUConstraints(t *testing.T) {
 	client := createTestClient(t)
 
-	// Test case 1: GPURequired = false
 	jobConfig := types.JobConfig{
 		Owner:          "test-user",
 		RepoURL:        "https://github.com/test/repo.git",
@@ -224,7 +243,7 @@ func TestGPUCheckOnlyAddedWhenGPURequired(t *testing.T) {
 		RegistryURL:    "registry.local:5000",
 		Test: &types.TestConfig{
 			EntryPoint:  true,
-			GPURequired: false, // GPU not required
+			GPURequired: false, // Not a GPU job
 		},
 	}
 
@@ -238,46 +257,26 @@ func TestGPUCheckOnlyAddedWhenGPURequired(t *testing.T) {
 		t.Fatalf("Failed to create test job specs: %v", err)
 	}
 
-	taskGroup := testJobs[0].TaskGroups[0]
-
-	// Should only have the main task, no GPU check
-	if len(taskGroup.Tasks) != 1 {
-		t.Errorf("Expected 1 task when GPURequired=false, got %d", len(taskGroup.Tasks))
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
 	}
 
-	if taskGroup.Tasks[0].Name != "main" {
-		t.Errorf("Expected only 'main' task when GPURequired=false, got '%s'", taskGroup.Tasks[0].Name)
-	}
+	constraints := testJobs[0].TaskGroups[0].Constraints
 
-	// Test case 2: GPURequired = true
-	jobConfig.Test.GPURequired = true
-	job.ID = "test-job-with-gpu"
-
-	testJobs, err = client.CreateTestJobSpecs(job, "")
-	if err != nil {
-		t.Fatalf("Failed to create test job specs: %v", err)
-	}
-
-	taskGroup = testJobs[0].TaskGroups[0]
-
-	// Should have GPU check task + main task
-	if len(taskGroup.Tasks) != 2 {
-		t.Errorf("Expected 2 tasks when GPURequired=true, got %d", len(taskGroup.Tasks))
-	}
-
-	// First task should be GPU check
-	if taskGroup.Tasks[0].Name != "gpu-availability-check" {
-		t.Errorf("Expected first task to be 'gpu-availability-check', got '%s'", taskGroup.Tasks[0].Name)
-	}
-
-	// Second task should be main
-	if taskGroup.Tasks[1].Name != "main" {
-		t.Errorf("Expected second task to be 'main', got '%s'", taskGroup.Tasks[1].Name)
+	// Should have NO GPU-related constraints
+	for _, c := range constraints {
+		if c.LTarget == "${meta.gpu-capable}" {
+			t.Error("Non-GPU jobs should not have gpu-capable constraint")
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" {
+			t.Error("Non-GPU jobs should not have gpu-dedicated constraint")
+		}
 	}
 }
 
-// TestGPUReschedulePolicy tests that reschedule policy is configured for GPU jobs
-func TestGPUReschedulePolicy(t *testing.T) {
+// TestGPUJobDefaultReschedulePolicy tests that GPU jobs have the default (no retry) reschedule policy
+// (We no longer use an aggressive reschedule policy since we use constraints now)
+func TestGPUJobDefaultReschedulePolicy(t *testing.T) {
 	client := createTestClient(t)
 
 	jobConfig := types.JobConfig{
@@ -305,119 +304,12 @@ func TestGPUReschedulePolicy(t *testing.T) {
 	}
 
 	reschedulePolicy := testJobs[0].TaskGroups[0].ReschedulePolicy
-	if reschedulePolicy == nil {
-		t.Fatal("Expected reschedule policy to be set for GPU jobs")
-	}
 
-	// Verify reschedule policy values
-	if reschedulePolicy.Attempts == nil || *reschedulePolicy.Attempts != 10 {
-		t.Errorf("Expected 10 reschedule attempts, got %v", reschedulePolicy.Attempts)
-	}
-
-	if reschedulePolicy.Unlimited == nil || *reschedulePolicy.Unlimited != false {
-		t.Error("Expected unlimited to be false")
-	}
-
-	if reschedulePolicy.DelayFunction == nil || *reschedulePolicy.DelayFunction != "exponential" {
-		t.Errorf("Expected exponential delay function, got %v", reschedulePolicy.DelayFunction)
-	}
-}
-
-// TestNonGPUJobHasNoRescheduleOverride tests that non-GPU jobs keep their default reschedule policy
-func TestNonGPUJobHasNoRescheduleOverride(t *testing.T) {
-	client := createTestClient(t)
-
-	jobConfig := types.JobConfig{
-		Owner:          "test-user",
-		RepoURL:        "https://github.com/test/repo.git",
-		GitRef:         "main",
-		DockerfilePath: "Dockerfile",
-		ImageName:      "test-image",
-		ImageTags:      []string{"latest"},
-		RegistryURL:    "registry.local:5000",
-		Test: &types.TestConfig{
-			EntryPoint:  true,
-			GPURequired: false, // Not a GPU job
-		},
-	}
-
-	job := &types.Job{
-		ID:     "test-job-no-reschedule",
-		Config: jobConfig,
-	}
-
-	testJobs, err := client.CreateTestJobSpecs(job, "")
-	if err != nil {
-		t.Fatalf("Failed to create test job specs: %v", err)
-	}
-
-	reschedulePolicy := testJobs[0].TaskGroups[0].ReschedulePolicy
-
-	// Non-GPU jobs should have attempts=0 (no rescheduling)
+	// GPU jobs should now have the default reschedule policy (no retries)
+	// not the aggressive 10-attempt policy we used with prestart checks
 	if reschedulePolicy != nil && reschedulePolicy.Attempts != nil && *reschedulePolicy.Attempts != 0 {
-		t.Errorf("Non-GPU jobs should have 0 reschedule attempts, got %d", *reschedulePolicy.Attempts)
+		t.Errorf("GPU jobs should have 0 reschedule attempts (default), got %d", *reschedulePolicy.Attempts)
 	}
-}
-
-// TestGPUCheckForCommandBasedTests tests GPU check is added for command-based tests
-func TestGPUCheckForCommandBasedTests(t *testing.T) {
-	client := createTestClient(t)
-
-	jobConfig := types.JobConfig{
-		Owner:          "test-user",
-		RepoURL:        "https://github.com/test/repo.git",
-		GitRef:         "main",
-		DockerfilePath: "Dockerfile",
-		ImageName:      "test-image",
-		ImageTags:      []string{"latest"},
-		RegistryURL:    "registry.local:5000",
-		Test: &types.TestConfig{
-			Commands:    []string{"python test.py", "pytest"},
-			GPURequired: true,
-		},
-	}
-
-	job := &types.Job{
-		ID:     "test-job-commands-gpu",
-		Config: jobConfig,
-	}
-
-	testJobs, err := client.CreateTestJobSpecs(job, "")
-	if err != nil {
-		t.Fatalf("Failed to create test job specs: %v", err)
-	}
-
-	// Should have 2 test jobs (one per command)
-	if len(testJobs) != 2 {
-		t.Fatalf("Expected 2 test jobs, got %d", len(testJobs))
-	}
-
-	// Each job should have GPU check as first task
-	for i, testJob := range testJobs {
-		taskGroup := testJob.TaskGroups[0]
-		if len(taskGroup.Tasks) < 2 {
-			t.Errorf("Job %d: Expected at least 2 tasks, got %d", i, len(taskGroup.Tasks))
-			continue
-		}
-		if taskGroup.Tasks[0].Name != "gpu-availability-check" {
-			t.Errorf("Job %d: Expected first task to be 'gpu-availability-check', got '%s'", i, taskGroup.Tasks[0].Name)
-		}
-	}
-}
-
-// TestGPUCheckTaskIsExported verifies that CreateTestJobSpecs is exported for testing
-func TestGPUCheckTaskIsExported(t *testing.T) {
-	// This test just verifies the method is accessible
-	var client *nomad.Client
-	_ = client // Verify the type exists and has the method
-
-	// The method should be accessible via client.CreateTestJobSpecs
-	// If this compiles, the method is properly exported
-}
-
-// Helper to check if a task has a specific lifecycle hook
-func hasLifecycleHook(task *nomadapi.Task, hook string) bool {
-	return task.Lifecycle != nil && task.Lifecycle.Hook == hook
 }
 
 // TestGPUComputeCapabilityConstraint tests that GPU compute capability constraint is added when specified
@@ -457,13 +349,16 @@ func TestGPUComputeCapabilityConstraint(t *testing.T) {
 	testJobSpec := testJobs[0]
 	constraints := testJobSpec.TaskGroups[0].Constraints
 
-	// Should have both gpu-capable and gpu_compute_capability constraints
-	var hasGPUCapable, hasComputeCapability bool
+	// Should have gpu-capable, gpu-dedicated exclusion, AND gpu_compute_capability constraints
+	var hasGPUCapable, hasGPUDedicated, hasComputeCapability bool
 	var computeCapValue, computeCapOperand string
 
 	for _, c := range constraints {
 		if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" && c.Operand == "=" {
 			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" && c.RTarget == "true" && c.Operand == "!=" {
+			hasGPUDedicated = true
 		}
 		if c.LTarget == "${meta.gpu_compute_capability}" {
 			hasComputeCapability = true
@@ -474,6 +369,10 @@ func TestGPUComputeCapabilityConstraint(t *testing.T) {
 
 	if !hasGPUCapable {
 		t.Error("Expected gpu-capable constraint to be present")
+	}
+
+	if !hasGPUDedicated {
+		t.Error("Expected gpu-dedicated exclusion constraint to be present")
 	}
 
 	if !hasComputeCapability {
@@ -526,12 +425,15 @@ func TestGPUComputeCapabilityNotAddedWhenEmpty(t *testing.T) {
 	testJobSpec := testJobs[0]
 	constraints := testJobSpec.TaskGroups[0].Constraints
 
-	// Should have gpu-capable but NOT gpu_compute_capability constraint
-	var hasGPUCapable, hasComputeCapability bool
+	// Should have gpu-capable and gpu-dedicated exclusion but NOT gpu_compute_capability constraint
+	var hasGPUCapable, hasGPUDedicated, hasComputeCapability bool
 
 	for _, c := range constraints {
 		if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" && c.Operand == "=" {
 			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" && c.RTarget == "true" && c.Operand == "!=" {
+			hasGPUDedicated = true
 		}
 		if c.LTarget == "${meta.gpu_compute_capability}" {
 			hasComputeCapability = true
@@ -540,6 +442,10 @@ func TestGPUComputeCapabilityNotAddedWhenEmpty(t *testing.T) {
 
 	if !hasGPUCapable {
 		t.Error("Expected gpu-capable constraint to be present")
+	}
+
+	if !hasGPUDedicated {
+		t.Error("Expected gpu-dedicated exclusion constraint to be present")
 	}
 
 	if hasComputeCapability {
@@ -586,13 +492,16 @@ func TestGPUComputeCapabilityWithoutGPURequired(t *testing.T) {
 	testJobSpec := testJobs[0]
 	constraints := testJobSpec.TaskGroups[0].Constraints
 
-	// Should have gpu_compute_capability but NOT gpu-capable constraint
-	var hasGPUCapable, hasComputeCapability bool
+	// Should have gpu_compute_capability but NOT gpu-capable or gpu-dedicated constraints
+	var hasGPUCapable, hasGPUDedicated, hasComputeCapability bool
 	var computeCapValue string
 
 	for _, c := range constraints {
 		if c.LTarget == "${meta.gpu-capable}" {
 			hasGPUCapable = true
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" {
+			hasGPUDedicated = true
 		}
 		if c.LTarget == "${meta.gpu_compute_capability}" {
 			hasComputeCapability = true
@@ -604,11 +513,159 @@ func TestGPUComputeCapabilityWithoutGPURequired(t *testing.T) {
 		t.Error("Expected gpu-capable constraint NOT to be present when GPURequired is false")
 	}
 
+	if hasGPUDedicated {
+		t.Error("Expected gpu-dedicated constraint NOT to be present when GPURequired is false")
+	}
+
 	if !hasComputeCapability {
 		t.Error("Expected gpu_compute_capability constraint to be present")
 	}
 
 	if computeCapValue != "8.6" {
 		t.Errorf("Expected gpu_compute_capability value '8.6', got '%s'", computeCapValue)
+	}
+}
+
+// TestGPUCheckForCommandBasedTests tests GPU constraints are added for command-based tests
+func TestGPUCheckForCommandBasedTests(t *testing.T) {
+	client := createTestClient(t)
+
+	jobConfig := types.JobConfig{
+		Owner:          "test-user",
+		RepoURL:        "https://github.com/test/repo.git",
+		GitRef:         "main",
+		DockerfilePath: "Dockerfile",
+		ImageName:      "test-image",
+		ImageTags:      []string{"latest"},
+		RegistryURL:    "registry.local:5000",
+		Test: &types.TestConfig{
+			Commands:    []string{"python test.py", "pytest"},
+			GPURequired: true,
+		},
+	}
+
+	job := &types.Job{
+		ID:     "test-job-commands-gpu",
+		Config: jobConfig,
+	}
+
+	testJobs, err := client.CreateTestJobSpecs(job, "")
+	if err != nil {
+		t.Fatalf("Failed to create test job specs: %v", err)
+	}
+
+	// Should have 2 test jobs (one per command)
+	if len(testJobs) != 2 {
+		t.Fatalf("Expected 2 test jobs, got %d", len(testJobs))
+	}
+
+	// Each job should have GPU constraints but NO prestart task
+	for i, testJob := range testJobs {
+		taskGroup := testJob.TaskGroups[0]
+
+		// Should only have 1 task (main), no prestart
+		if len(taskGroup.Tasks) != 1 {
+			t.Errorf("Job %d: Expected 1 task (main), got %d", i, len(taskGroup.Tasks))
+		}
+
+		// Should have GPU constraints
+		var hasGPUCapable, hasGPUDedicated bool
+		for _, c := range taskGroup.Constraints {
+			if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" {
+				hasGPUCapable = true
+			}
+			if c.LTarget == "${meta.gpu-dedicated}" && c.RTarget == "true" && c.Operand == "!=" {
+				hasGPUDedicated = true
+			}
+		}
+
+		if !hasGPUCapable {
+			t.Errorf("Job %d: Expected gpu-capable constraint", i)
+		}
+		if !hasGPUDedicated {
+			t.Errorf("Job %d: Expected gpu-dedicated exclusion constraint", i)
+		}
+	}
+}
+
+// TestGPUNodePinWithComputeCapability tests that node pin works with compute capability
+func TestGPUNodePinWithComputeCapability(t *testing.T) {
+	client := createTestClient(t)
+
+	jobConfig := types.JobConfig{
+		Owner:          "test-user",
+		RepoURL:        "https://github.com/test/repo.git",
+		GitRef:         "main",
+		DockerfilePath: "Dockerfile",
+		ImageName:      "test-image",
+		ImageTags:      []string{"latest"},
+		RegistryURL:    "registry.local:5000",
+		Test: &types.TestConfig{
+			EntryPoint:           true,
+			GPURequired:          true,
+			GPUNodePin:           "gpu002",
+			GPUComputeCapability: "8.0", // Ampere
+		},
+	}
+
+	job := &types.Job{
+		ID:     "test-job-pin-with-compute",
+		Config: jobConfig,
+	}
+
+	testJobs, err := client.CreateTestJobSpecs(job, "")
+	if err != nil {
+		t.Fatalf("Failed to create test job specs: %v", err)
+	}
+
+	if len(testJobs) == 0 {
+		t.Fatal("Expected at least one test job")
+	}
+
+	constraints := testJobs[0].TaskGroups[0].Constraints
+
+	// Should have: gpu-capable, node pin, AND compute capability (but NOT gpu-dedicated exclusion)
+	var hasGPUCapable, hasNodePin, hasComputeCapability, hasGPUDedicated bool
+	var nodePinValue, computeCapValue string
+
+	for _, c := range constraints {
+		if c.LTarget == "${meta.gpu-capable}" && c.RTarget == "true" && c.Operand == "=" {
+			hasGPUCapable = true
+		}
+		if c.LTarget == "${node.unique.name}" && c.Operand == "=" {
+			hasNodePin = true
+			nodePinValue = c.RTarget
+		}
+		if c.LTarget == "${meta.gpu_compute_capability}" && c.Operand == ">=" {
+			hasComputeCapability = true
+			computeCapValue = c.RTarget
+		}
+		if c.LTarget == "${meta.gpu-dedicated}" {
+			hasGPUDedicated = true
+		}
+	}
+
+	if !hasGPUCapable {
+		t.Error("Expected gpu-capable constraint")
+	}
+
+	if !hasNodePin {
+		t.Error("Expected node pin constraint")
+	}
+
+	if nodePinValue != "gpu002" {
+		t.Errorf("Expected node pin value 'gpu002', got '%s'", nodePinValue)
+	}
+
+	if !hasComputeCapability {
+		t.Error("Expected compute capability constraint")
+	}
+
+	if computeCapValue != "8.0" {
+		t.Errorf("Expected compute capability '8.0', got '%s'", computeCapValue)
+	}
+
+	if hasGPUDedicated {
+		t.Error("Expected no gpu-dedicated constraint when node pin is used")
 	}
 }

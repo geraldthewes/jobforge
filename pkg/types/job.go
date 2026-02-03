@@ -40,6 +40,7 @@ type TestConfig struct {
 	GPURequired          bool                   `json:"gpu_required,omitempty" yaml:"gpu_required,omitempty"`           // Enable GPU runtime (nvidia) for test containers
 	GPUCount             int                    `json:"gpu_count,omitempty" yaml:"gpu_count,omitempty"`                 // Number of GPUs to allocate (0 = all available)
 	GPUComputeCapability string                 `json:"gpu_compute_capability,omitempty" yaml:"gpu_compute_capability,omitempty"` // Minimum GPU compute capability (e.g., "7.5" for Turing+)
+	GPUNodePin           string                 `json:"gpu_node_pin,omitempty" yaml:"gpu_node_pin,omitempty"`           // Pin to specific GPU node (e.g., "gpu005") instead of using shared nodes
 	Constraints          []Constraint           `json:"constraints,omitempty" yaml:"constraints,omitempty"`             // Custom node constraints for test job placement
 
 	// External Python test configuration (runs via python-executor on CLI machine)

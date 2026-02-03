@@ -401,16 +401,6 @@ func (nc *Client) CreateTestJobSpecs(job *types.Job, buildNodeID string) ([]*nom
 				}
 			}
 
-			// Add GPU availability check for GPU-required tests
-			if job.Config.Test.GPURequired {
-				gpuCheckTask := nc.createGPUAvailabilityCheckTask()
-				testJobSpec.TaskGroups[0].Tasks = append(
-					[]*nomadapi.Task{gpuCheckTask},
-					testJobSpec.TaskGroups[0].Tasks...,
-				)
-				testJobSpec.TaskGroups[0].ReschedulePolicy = gpuReschedulePolicy()
-			}
-
 			testJobs = append(testJobs, testJobSpec)
 		}
 	}
@@ -485,16 +475,6 @@ func (nc *Client) CreateTestJobSpecs(job *types.Job, buildNodeID string) ([]*nom
 				}
 				mainTask.Templates = templates
 			}
-		}
-
-		// Add GPU availability check for GPU-required tests
-		if job.Config.Test.GPURequired {
-			gpuCheckTask := nc.createGPUAvailabilityCheckTask()
-			testJobSpec.TaskGroups[0].Tasks = append(
-				[]*nomadapi.Task{gpuCheckTask},
-				testJobSpec.TaskGroups[0].Tasks...,
-			)
-			testJobSpec.TaskGroups[0].ReschedulePolicy = gpuReschedulePolicy()
 		}
 
 		testJobs = append(testJobs, testJobSpec)
@@ -644,17 +624,6 @@ func (nc *Client) createExternalTestJobSpec(job *types.Job, buildNodeID string) 
 			}
 			mainTask.Templates = templates
 		}
-	}
-
-	// Add GPU availability check for GPU-required external tests
-	if job.Config.Test != nil && job.Config.Test.GPURequired {
-		gpuCheckTask := nc.createGPUAvailabilityCheckTask()
-		testJobSpec.TaskGroups[0].Tasks = append(
-			[]*nomadapi.Task{gpuCheckTask},
-			testJobSpec.TaskGroups[0].Tasks...,
-		)
-		// Note: Service jobs have different reschedule semantics, but the prestart
-		// failure will still prevent the main task from running
 	}
 
 	return testJobSpec, nil
@@ -1191,6 +1160,23 @@ func (nc *Client) buildTestConstraints(job *types.Job, buildNodeID string) []*no
 			RTarget: "true",
 			Operand: "=",
 		})
+
+		// If pinning to specific node, use that instead of gpu-dedicated exclusion
+		if job.Config.Test.GPUNodePin != "" {
+			constraints = append(constraints, &nomadapi.Constraint{
+				LTarget: "${node.unique.name}",
+				RTarget: job.Config.Test.GPUNodePin,
+				Operand: "=",
+			})
+		} else {
+			// Exclude dedicated GPU nodes (used by ollama, nemotron, llama-swap)
+			// Jobs should schedule on shared GPU nodes instead
+			constraints = append(constraints, &nomadapi.Constraint{
+				LTarget: "${meta.gpu-dedicated}",
+				RTarget: "true",
+				Operand: "!=",
+			})
+		}
 	}
 
 	// Add GPU compute capability constraint if specified (e.g., "7.5" for Turing or newer)
@@ -1273,44 +1259,6 @@ func (nc *Client) buildTestResources(job *types.Job, cpu, memory, disk int) *nom
 	return resources
 }
 
-// createGPUAvailabilityCheckTask creates a prestart lifecycle task that checks
-// GPU availability via Consul KV before running GPU-dependent tests.
-// If the key gpu/occupied/<node-name> exists, the prestart fails and Nomad reschedules.
-func (nc *Client) createGPUAvailabilityCheckTask() *nomadapi.Task {
-	// Check if GPU is occupied on this node via Consul KV
-	// Uses Nomad's ${node.unique.name} interpolation for the node name
-	checkCommand := `if consul kv get gpu/occupied/${node.unique.name} >/dev/null 2>&1; then echo "GPU on ${node.unique.name} is occupied by another job"; exit 1; fi; echo "GPU available on ${node.unique.name}"`
-
-	return &nomadapi.Task{
-		Name:   "gpu-availability-check",
-		Driver: "exec",
-		Config: map[string]interface{}{
-			"command": "/bin/sh",
-			"args":    []string{"-c", checkCommand},
-		},
-		Lifecycle: &nomadapi.TaskLifecycle{
-			Hook:    "prestart",
-			Sidecar: false,
-		},
-		Resources: &nomadapi.Resources{
-			CPU:      intPtr(50),
-			MemoryMB: intPtr(32),
-		},
-	}
-}
-
-// gpuReschedulePolicy returns a reschedule policy for GPU jobs
-// that allows retrying on other nodes when GPU is occupied
-func gpuReschedulePolicy() *nomadapi.ReschedulePolicy {
-	return &nomadapi.ReschedulePolicy{
-		Attempts:      intPtr(10),
-		Interval:      durationPtr("30m"),
-		Delay:         durationPtr("15s"),
-		DelayFunction: stringPtr("exponential"),
-		MaxDelay:      durationPtr("5m"),
-		Unlimited:     boolPtr(false),
-	}
-}
 
 // createPruneStorageJobSpec creates a Nomad job specification for pruning buildah storage cache
 func (nc *Client) createPruneStorageJobSpec(req *types.PruneStorageRequest, pruneJobID string) *nomadapi.Job {
