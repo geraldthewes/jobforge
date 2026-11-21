@@ -345,12 +345,14 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := types.GetStatusResponse{
-		JobID:       job.ID,
-		Status:      job.Status,
-		Config:      &job.Config, // Include config for debugging
-		Metrics:     job.Metrics,
-		Error:       job.Error,
-		Allocations: allocations,
+		JobID:         job.ID,
+		Status:        job.Status,
+		Config:        &job.Config, // Include config for debugging
+		Metrics:       job.Metrics,
+		Error:         job.Error,
+		Allocations:   allocations,
+		Result:        job.AgentResult,
+		FollowUpJobID: job.FollowUpJobID,
 	}
 
 	s.writeJSONResponse(w, response)
@@ -419,6 +421,8 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 			filteredLogs = types.JobLogs{Test: logs.Test}
 		case "publish":
 			filteredLogs = types.JobLogs{Publish: logs.Publish}
+		case "agent":
+			filteredLogs = types.JobLogs{Agent: logs.Agent}
 		default:
 			// Invalid phase, return all logs
 			filteredLogs = logs
@@ -824,6 +828,32 @@ func (s *Server) backgroundJobMonitor(ctx context.Context) {
 					
 					oldStatus := freshJob.Status
 					oldPhase := freshJob.CurrentPhase
+
+					if phase, overdue := nomad.JobExceededTimeout(freshJob, time.Now(), s.config.Build.BuildTimeout, s.config.Build.TestTimeout); overdue {
+						s.logger.WithFields(logrus.Fields{
+							"job_id": freshJob.ID,
+							"phase":  phase,
+							"status": freshJob.Status,
+						}).Warn("Job exceeded its timeout; killing it")
+						now := time.Now()
+						freshJob.Status = types.StatusFailed
+						freshJob.Error = fmt.Sprintf("exceeded %s timeout", phase)
+						freshJob.FailedPhase = phase
+						if freshJob.CurrentPhase == "" {
+							freshJob.CurrentPhase = phase
+						}
+						freshJob.FinishedAt = &now
+						freshJob.UpdatedAt = now
+						if err := s.nomadClient.KillJob(freshJob); err != nil {
+							s.logger.WithError(err).WithField("job_id", freshJob.ID).Warn("Failed to kill job after timeout")
+						}
+						if err := s.storage.UpdateJob(freshJob); err != nil {
+							s.logger.WithError(err).WithField("job_id", freshJob.ID).Warn("Failed to store timed-out job")
+						}
+						s.handleJobStatusChange(freshJob, oldStatus, oldPhase)
+						unlock()
+						continue
+					}
 					
 					// Update job status which will trigger phase transitions
 					updatedJob, err := s.nomadClient.UpdateJobStatus(freshJob)
@@ -844,6 +874,10 @@ func (s *Server) backgroundJobMonitor(ctx context.Context) {
 						continue
 					}
 					
+					if updatedJob.Status == types.StatusSucceeded && updatedJob.FollowUpJobID == "" {
+						s.maybeSubmitFollowUpBuild(updatedJob)
+					}
+
 					// Save updated job state
 					s.storage.UpdateJob(updatedJob)
 					
@@ -1181,8 +1215,23 @@ func (s *Server) handleCleanupCacheJobStatus(w http.ResponseWriter, r *http.Requ
 	s.writeJSONResponse(w, response)
 }
 
-// validateJobConfig validates the job configuration and returns an error if validation fails
+// validateJobConfig validates the job configuration and returns an error if validation fails.
+// Build jobs keep the historical required fields. Agent jobs validate the pipeline config instead.
 func validateJobConfig(config *types.JobConfig) error {
+	if config == nil {
+		return fmt.Errorf("job configuration is required")
+	}
+	switch config.Kind {
+	case "", types.JobKindBuild:
+		return validateBuildJobConfig(config)
+	case types.JobKindAgent:
+		return validateAgentJobConfig(config)
+	default:
+		return fmt.Errorf("kind must be %q or %q", types.JobKindBuild, types.JobKindAgent)
+	}
+}
+
+func validateBuildJobConfig(config *types.JobConfig) error {
 	// Required fields
 	if config.Owner == "" {
 		return fmt.Errorf("owner is required")
@@ -1252,6 +1301,102 @@ func validateJobConfig(config *types.JobConfig) error {
 	// Optional fields (git_credentials_path, registry_credentials_path, test, image_tags)
 	// are allowed to be empty
 
+	return nil
+}
+
+func validateAgentJobConfig(config *types.JobConfig) error {
+	if config.Owner == "" {
+		return fmt.Errorf("owner is required")
+	}
+	if config.RepoURL == "" {
+		return fmt.Errorf("repo_url is required")
+	}
+	if config.GitRef == "" {
+		return fmt.Errorf("git_ref is required")
+	}
+	if config.Agent == nil {
+		return fmt.Errorf("agent configuration is required when kind is agent")
+	}
+	agent := config.Agent
+	hasTask := strings.TrimSpace(agent.Task) != ""
+	hasTaskPath := strings.TrimSpace(agent.TaskPath) != ""
+	if hasTask == hasTaskPath {
+		return fmt.Errorf("exactly one of agent.task or agent.task_path is required")
+	}
+	if strings.TrimSpace(agent.Image) == "" {
+		return fmt.Errorf("agent.image is required")
+	}
+	if agent.CLI != "" && agent.CLI != "opencode" && strings.TrimSpace(agent.CommandTemplate) == "" {
+		return fmt.Errorf("agent.cli %q requires agent.command_template", agent.CLI)
+	}
+	if agent.Timeout.Std() < 0 || agent.StepTimeout.Std() < 0 {
+		return fmt.Errorf("agent timeouts must be positive")
+	}
+	if err := validateVaultSecrets("agent", agent.VaultSecrets, agent.VaultPolicies); err != nil {
+		return err
+	}
+	if config.Output == nil {
+		return fmt.Errorf("output configuration is required when kind is agent")
+	}
+	switch config.Output.Provider {
+	case "github":
+	case "gitea":
+		if strings.TrimSpace(config.Output.APIURL) == "" {
+			return fmt.Errorf("output.api_url is required for gitea")
+		}
+	default:
+		return fmt.Errorf("output.provider must be github or gitea")
+	}
+	if config.Review == nil {
+		return fmt.Errorf("review configuration is required when kind is agent")
+	}
+	connection := config.Review.Connection
+	if connection.Provider == "" || connection.Model == "" || connection.CredentialEnv == "" {
+		return fmt.Errorf("review.connection provider, model, and credential_env are required")
+	}
+	switch connection.Provider {
+	case "anthropic", "openai", "bedrock":
+	default:
+		return fmt.Errorf("review.connection.provider must be anthropic, openai, or bedrock")
+	}
+	switch config.Review.OnInsufficientEvidence {
+	case "", "fail", "warn":
+	default:
+		return fmt.Errorf("review.on_insufficient_evidence must be fail or warn")
+	}
+	if agent.FollowUpBuild != nil && agent.FollowUpBuild.Enabled {
+		if strings.TrimSpace(agent.FollowUpBuild.ImageName) == "" {
+			return fmt.Errorf("agent.follow_up_build.image_name is required when follow-up build is enabled")
+		}
+		if strings.TrimSpace(agent.FollowUpBuild.RegistryURL) == "" {
+			return fmt.Errorf("agent.follow_up_build.registry_url is required when follow-up build is enabled")
+		}
+	}
+
+	types.ApplyAgentDefaults(config)
+	return nil
+}
+
+func validateVaultSecrets(prefix string, secrets []types.VaultSecret, policies []string) error {
+	if len(secrets) == 0 {
+		return nil
+	}
+	if len(policies) == 0 {
+		return fmt.Errorf("%s.vault_policies is required when vault_secrets are specified", prefix)
+	}
+	for i, secret := range secrets {
+		if secret.Path == "" {
+			return fmt.Errorf("%s.vault_secrets[%d]: path is required", prefix, i)
+		}
+		if len(secret.Fields) == 0 {
+			return fmt.Errorf("%s.vault_secrets[%d]: fields map cannot be empty", prefix, i)
+		}
+		for vaultField, envVar := range secret.Fields {
+			if vaultField == "" || envVar == "" {
+				return fmt.Errorf("%s.vault_secrets[%d]: invalid field mapping (empty field or env var)", prefix, i)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1368,12 +1513,14 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request, jobID s
 	}
 
 	response := types.GetStatusResponse{
-		JobID:       updatedJob.ID,
-		Status:      updatedJob.Status,
-		Config:      &updatedJob.Config, // Include config for debugging
-		Metrics:     updatedJob.Metrics,
-		Error:       updatedJob.Error,
-		Allocations: allocations,
+		JobID:         updatedJob.ID,
+		Status:        updatedJob.Status,
+		Config:        &updatedJob.Config, // Include config for debugging
+		Metrics:       updatedJob.Metrics,
+		Error:         updatedJob.Error,
+		Allocations:   allocations,
+		Result:        updatedJob.AgentResult,
+		FollowUpJobID: updatedJob.FollowUpJobID,
 	}
 	
 	w.Header().Set("Content-Type", "application/json")
@@ -1700,9 +1847,9 @@ func (s *Server) sendWebhook(job *types.Job, event types.WebhookEvent) {
 	// Check if we should send webhook for this event type
 	shouldSend := false
 	switch event {
-	case types.WebhookEventJobCompleted:
+	case types.WebhookEventJobCompleted, types.WebhookEventAgentCompleted:
 		shouldSend = job.Config.WebhookOnSuccess || (job.Config.WebhookOnSuccess == false && job.Config.WebhookOnFailure == false) // Default to true
-	case types.WebhookEventJobFailed, types.WebhookEventBuildFailed, types.WebhookEventTestFailed:
+	case types.WebhookEventJobFailed, types.WebhookEventBuildFailed, types.WebhookEventTestFailed, types.WebhookEventPublishFailed, types.WebhookEventAgentFailed:
 		shouldSend = job.Config.WebhookOnFailure || (job.Config.WebhookOnSuccess == false && job.Config.WebhookOnFailure == false) // Default to true
 	default:
 		shouldSend = true // Send all other events by default
@@ -1723,6 +1870,14 @@ func (s *Server) sendWebhook(job *types.Job, event types.WebhookEvent) {
 		ImageName: job.Config.ImageName,
 		ImageTags: job.Config.ImageTags,
 		Phase:     job.CurrentPhase,
+		Event:     string(event),
+	}
+	if job.AgentResult != nil {
+		payload.ResultBranch = job.AgentResult.Branch
+		payload.PRURL = job.AgentResult.PRURL
+		payload.Verdict = job.AgentResult.Verdict
+		payload.Iterations = job.AgentResult.Iterations
+		payload.FindingsCount = job.AgentResult.FindingsCount
 	}
 	
 	// Calculate duration using job start/end times
@@ -1835,6 +1990,37 @@ func (s *Server) generateWebhookSignature(payload []byte, secret string) string 
 	return "sha256=" + hex.EncodeToString(h.Sum(nil))
 }
 
+// maybeSubmitFollowUpBuild starts the existing build/test pipeline on the branch an agent pushed.
+// It is skipped when follow-up is disabled or the checkout has no Dockerfile.
+func (s *Server) maybeSubmitFollowUpBuild(job *types.Job) {
+	if job == nil || job.FollowUpJobID != "" {
+		return
+	}
+	cfg, err := nomad.FollowUpBuildJobConfig(job)
+	if err != nil {
+		s.logger.WithError(err).WithField("job_id", job.ID).Warn("Failed to build follow-up job config")
+		return
+	}
+	if cfg == nil {
+		return
+	}
+	child, err := s.nomadClient.CreateJob(cfg)
+	if err != nil {
+		s.logger.WithError(err).WithField("job_id", job.ID).Error("Failed to submit follow-up build")
+		return
+	}
+	if err := s.storage.StoreJob(child); err != nil {
+		s.logger.WithError(err).WithField("job_id", child.ID).Error("Failed to store follow-up build")
+		return
+	}
+	job.FollowUpJobID = child.ID
+	s.logger.WithFields(logrus.Fields{
+		"job_id":           job.ID,
+		"follow_up_job_id": child.ID,
+		"git_ref":          cfg.GitRef,
+	}).Info("Submitted follow-up build for agent job")
+}
+
 // handleJobStatusChange sends appropriate webhook events based on job status/phase changes
 func (s *Server) handleJobStatusChange(job *types.Job, oldStatus types.JobStatus, oldPhase string) {
 	newStatus := job.Status
@@ -1867,6 +2053,10 @@ func (s *Server) handleJobStatusChange(job *types.Job, oldStatus types.JobStatus
 		case types.StatusSucceeded:
 			// Job completed successfully - always send job completion event
 			events = append(events, types.WebhookEventJobCompleted)
+			if job.Config.IsAgent() {
+				events = append(events, types.WebhookEventAgentCompleted)
+				break
+			}
 
 			// Also send phase completion events based on current phase
 			switch newPhase {
@@ -1881,6 +2071,10 @@ func (s *Server) handleJobStatusChange(job *types.Job, oldStatus types.JobStatus
 		case types.StatusFailed:
 			// Job failed - always send job failure event
 			events = append(events, types.WebhookEventJobFailed)
+			if job.Config.IsAgent() {
+				events = append(events, types.WebhookEventAgentFailed)
+				break
+			}
 
 			// Also send phase failure events based on current phase
 			switch newPhase {

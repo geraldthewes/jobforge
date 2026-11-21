@@ -1,0 +1,69 @@
+# Sample agent job. Submit with:
+#   jobforge submit-job examples/agent-job.yaml
+#
+# Build jobs omit `kind` (or set kind: build) and are unchanged.
+kind: agent
+owner: factory
+repo_url: https://github.com/example/service.git
+git_ref: main
+
+agent:
+  task: |
+    Add a /health endpoint that returns 200 and a unit test that covers it.
+    Run the project's tests yourself. Do not use Docker.
+  image: registry.cluster:5000/jobforge-agent:latest
+  cli: opencode
+  model: anthropic/claude-sonnet-4-5
+  timeout: 60m
+  step_timeout: 20m
+  vault_policies:
+    - nomad-agent
+  vault_secrets:
+    - path: secret/data/llm
+      fields:
+        api_key: ANTHROPIC_API_KEY
+    - path: secret/data/github
+      fields:
+        token: GH_TOKEN
+  resource_limits:
+    cpu: "2000"
+    memory: "4096"
+    disk: "20480"
+  # After the agent pushes, jobforge runs a normal build/test job on that
+  # branch when the Dockerfile exists. Omit this block to skip that check.
+  follow_up_build:
+    enabled: true
+    dockerfile_path: Dockerfile
+    image_name: service
+    image_tags:
+      - latest
+    registry_url: registry.cluster:5000/service
+    test:
+      commands:
+        - go test ./...
+
+review:
+  connection:
+    provider: anthropic
+    model: claude-sonnet-4-5
+    credential_env: ANTHROPIC_API_KEY
+  check: local
+  max_iterations: 2
+  on_insufficient_evidence: fail
+  fix_on:
+    dispositions:
+      - confirmed
+    blocks_merge: true
+    severities:
+      - critical
+      - high
+
+output:
+  provider: github
+  branch_prefix: agent/
+  base_branch: main
+  open_pr: true
+  # Gitea instead of GitHub:
+  # provider: gitea
+  # api_url: https://gitea.example.com
+  # token_env: GITEA_TOKEN

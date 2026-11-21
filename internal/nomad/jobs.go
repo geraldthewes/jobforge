@@ -107,12 +107,28 @@ func (nc *Client) createBuildJobSpec(job *types.Job) (*nomadapi.Job, error) {
 		)
 	}
 	
-	// Add repository cloning and setup
+	// Add repository cloning and setup. Git credentials rendered to
+	// /secrets/git-creds are applied when the file is present.
 	buildCommands = append(buildCommands,
-		"# Clone repository", 
-		fmt.Sprintf("git clone %s /tmp/repo", job.Config.RepoURL),
+		"# Clone repository",
+		fmt.Sprintf("REPO_URL=%s", shellQuote(job.Config.RepoURL)),
+		fmt.Sprintf("GIT_REF=%s", shellQuote(job.Config.GitRef)),
+		"if [ -f /secrets/git-creds ]; then",
+		"  set -a",
+		"  . /secrets/git-creds",
+		"  set +a",
+		"fi",
+		"CLONE_URL=\"$REPO_URL\"",
+		"GIT_AUTH_TOKEN=\"${GIT_TOKEN:-${GIT_PASSWORD:-}}\"",
+		"if [ -n \"$GIT_AUTH_TOKEN\" ]; then",
+		"  case \"$CLONE_URL\" in",
+		"    https://*) CLONE_URL=\"https://x-access-token:${GIT_AUTH_TOKEN}@${CLONE_URL#https://}\" ;;",
+		"    http://*) CLONE_URL=\"http://x-access-token:${GIT_AUTH_TOKEN}@${CLONE_URL#http://}\" ;;",
+		"  esac",
+		"fi",
+		"git clone \"$CLONE_URL\" /tmp/repo",
 		"cd /tmp/repo",
-		fmt.Sprintf("git checkout %s", job.Config.GitRef),
+		"git checkout \"$GIT_REF\"",
 		"",
 		"# Configure Buildah for isolated layer caching",
 		"export STORAGE_DRIVER=overlay",
@@ -935,6 +951,10 @@ func (nc *Client) createCleanupJobSpec(job *types.Job) *nomadapi.Job {
 // Helper functions for creating Nomad API types
 func stringPtr(s string) *string {
 	return &s
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func intPtr(i int) *int {

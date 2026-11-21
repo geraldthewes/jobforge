@@ -67,6 +67,10 @@ func NewClient(cfg *config.Config, storage interface {
 
 // CreateJob creates a new build job and starts the build phase
 func (nc *Client) CreateJob(jobConfig *types.JobConfig) (*types.Job, error) {
+	if jobConfig != nil && jobConfig.IsAgent() {
+		return nc.createAgentJob(jobConfig)
+	}
+
 	// Generate jobID FIRST so it can be included in lock metadata
 	jobID := uuid.New().String()
 
@@ -193,6 +197,10 @@ func (nc *Client) CreateJob(jobConfig *types.JobConfig) (*types.Job, error) {
 
 // UpdateJobStatus updates the job status by querying Nomad
 func (nc *Client) UpdateJobStatus(job *types.Job) (*types.Job, error) {
+	if job != nil && job.Config.IsAgent() {
+		return nc.updateAgentJobStatus(job)
+	}
+
 	// Check if tests are configured (including external python tests)
 	skipTests := job.Config.Test == nil || (len(job.Config.Test.Commands) == 0 && !job.Config.Test.EntryPoint && job.Config.Test.PythonFile == "")
 
@@ -666,6 +674,15 @@ func (nc *Client) GetJobLogs(job *types.Job) (types.JobLogs, error) {
 			logs.Publish = publishLogs
 		}
 	}
+
+	if job.AgentJobID != "" {
+		agentLogs, err := nc.getWindowedJobLogs(job.AgentJobID, "agent")
+		if err != nil {
+			nc.logger.WithError(err).Warn("Failed to get agent logs")
+		} else {
+			logs.Agent = truncateLogLines(agentLogs, maxStoredLogBytes)
+		}
+	}
 	
 	return logs, nil
 }
@@ -724,6 +741,20 @@ func (nc *Client) KillJob(job *types.Job) error {
 				nc.logger.WithError(err).Warn("Graceful stop failed, forcing termination")
 				if _, _, err := nc.client.Jobs().Deregister(job.TestJobNomadID, true, nil); err != nil {
 					errors = append(errors, fmt.Sprintf("external test job %s: %v", job.TestJobNomadID, err))
+				}
+			}
+		}
+	}
+
+	// Handle the agent allocation
+	if job.AgentJobID != "" {
+		agentStatus, err := nc.getJobStatus(job.AgentJobID)
+		if err == nil && (agentStatus == "running" || agentStatus == "pending") {
+			nc.logger.WithField("agent_job_id", job.AgentJobID).Info("Gracefully stopping agent job")
+			if _, _, err := nc.client.Jobs().Deregister(job.AgentJobID, false, nil); err != nil {
+				nc.logger.WithError(err).Warn("Graceful stop failed, forcing termination")
+				if _, _, err := nc.client.Jobs().Deregister(job.AgentJobID, true, nil); err != nil {
+					errors = append(errors, fmt.Sprintf("agent: %v", err))
 				}
 			}
 		}
@@ -810,6 +841,16 @@ func (nc *Client) CleanupFailedJobs(job *types.Job) error {
 		}
 	}
 	
+	if job.AgentJobID != "" {
+		if status, err := nc.getJobStatus(job.AgentJobID); err == nil && (status == "failed" || status == "dead") {
+			if _, _, err := nc.client.Jobs().Deregister(job.AgentJobID, true, &nomadapi.WriteOptions{}); err != nil {
+				errors = append(errors, fmt.Sprintf("agent job cleanup: %v", err))
+			} else {
+				nc.logger.WithField("job_id", job.AgentJobID).Info("Cleaned up failed agent job from Nomad")
+			}
+		}
+	}
+
 	// Clean up publish job if it's dead/failed  
 	if job.PublishJobID != "" {
 		if status, err := nc.getJobStatus(job.PublishJobID); err == nil && (status == "failed" || status == "dead") {
@@ -1923,6 +1964,18 @@ func (nc *Client) GetJobAllocations(job *types.Job) (*types.JobAllocations, erro
 			nc.logger.WithError(err).WithField("job_id", job.PublishJobID).Warn("Failed to get publish allocations")
 		} else {
 			allocations.Publish = phaseAllocs
+			if phaseAllocs.HasWarning {
+				allocations.HasAnyWarning = true
+			}
+		}
+	}
+
+	if job.AgentJobID != "" {
+		phaseAllocs, err := nc.getPhaseAllocations(job.AgentJobID, "agent")
+		if err != nil {
+			nc.logger.WithError(err).WithField("job_id", job.AgentJobID).Warn("Failed to get agent allocations")
+		} else {
+			allocations.Agent = phaseAllocs
 			if phaseAllocs.HasWarning {
 				allocations.HasAnyWarning = true
 			}
