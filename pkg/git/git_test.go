@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	// Ignore developer url.insteadOf rewrites so remote URLs stay literal.
+	os.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	os.Exit(m.Run())
+}
+
 func TestNormalizeRepoURL(t *testing.T) {
 	tests := []struct {
 		name     string

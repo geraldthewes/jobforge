@@ -13,6 +13,8 @@ const (
 	StatusPublishing      JobStatus = "PUBLISHING"
 	StatusSucceeded       JobStatus = "SUCCEEDED"
 	StatusFailed          JobStatus = "FAILED"
+	StatusAgentRunning    JobStatus = "AGENT_RUNNING"
+	StatusReviewing       JobStatus = "REVIEWING"
 )
 
 // VaultSecret defines a Vault secret path and field mappings for environment variables
@@ -53,8 +55,11 @@ type TestConfig struct {
 	PythonEnv          map[string]string `json:"python_env,omitempty" yaml:"python_env,omitempty"`          // Environment variables for python-executor (separate from container env)
 }
 
-// JobConfig represents the configuration for a build job
+// JobConfig represents the configuration for a build or agent job.
+// Kind defaults to "build". Agent jobs use Agent, Review, and Output
+// and do not require dockerfile or registry fields.
 type JobConfig struct {
+	Kind                    string   `json:"kind,omitempty" yaml:"kind,omitempty"` // "build" (default) or "agent"
 	Owner                   string   `json:"owner" yaml:"owner"`
 	RepoURL                 string   `json:"repo_url" yaml:"repo_url"`
 	GitRef                  string   `json:"git_ref" yaml:"git_ref"`
@@ -79,6 +84,11 @@ type JobConfig struct {
 
 	// Local build history configuration (CLI only)
 	DeployDir               string   `json:"deploy_dir,omitempty" yaml:"deploy_dir,omitempty"`                 // Directory for build history (default: "./deploy")
+
+	// Agent pipeline (kind: agent). Ignored for build jobs.
+	Agent  *AgentConfig  `json:"agent,omitempty" yaml:"agent,omitempty"`
+	Review *ReviewConfig `json:"review,omitempty" yaml:"review,omitempty"`
+	Output *OutputConfig `json:"output,omitempty" yaml:"output,omitempty"`
 }
 
 // PhaseResourceLimits defines resource constraints for a single phase
@@ -279,6 +289,12 @@ type Job struct {
 	BuildJobID   string   `json:"build_job_id,omitempty"`
 	TestJobIDs   []string `json:"test_job_ids,omitempty"`  // Multiple test jobs
 	PublishJobID string   `json:"publish_job_id,omitempty"`
+	AgentJobID   string   `json:"agent_job_id,omitempty"`
+
+	// Agent pipeline outcome parsed from the JOBFORGE_RESULT log line.
+	AgentResult *AgentResult `json:"agent_result,omitempty"`
+	// FollowUpJobID is the build job submitted after a successful agent run.
+	FollowUpJobID string `json:"follow_up_job_id,omitempty"`
 	
 	// Logs for each phase
 	Logs JobLogs `json:"logs"`
@@ -305,6 +321,7 @@ type JobLogs struct {
 	Build   []string `json:"build"`
 	Test    []string `json:"test"`
 	Publish []string `json:"publish"`
+	Agent   []string `json:"agent,omitempty"`
 }
 
 // JobMetrics contains performance metrics for the job
@@ -370,6 +387,14 @@ type WebhookPayload struct {
 	Metrics     *JobMetrics           `json:"metrics,omitempty"`     // Optional: include metrics
 	Phase       string                `json:"phase,omitempty"`       // Current/failed phase
 	Signature   string                `json:"signature,omitempty"`   // HMAC signature for webhook authentication
+	Event       string                `json:"event,omitempty"`       // Webhook event name
+
+	// Agent pipeline fields, set for agent jobs.
+	ResultBranch  string `json:"result_branch,omitempty"`
+	PRURL         string `json:"pr_url,omitempty"`
+	Verdict       string `json:"verdict,omitempty"`
+	Iterations    int    `json:"iterations,omitempty"`
+	FindingsCount int    `json:"findings_count,omitempty"`
 }
 
 // WebhookEvent represents different types of webhook events
@@ -387,6 +412,8 @@ const (
 	WebhookEventPublishFailed  WebhookEvent = "publish.failed"
 	WebhookEventJobCompleted   WebhookEvent = "job.completed"
 	WebhookEventJobFailed      WebhookEvent = "job.failed"
+	WebhookEventAgentCompleted WebhookEvent = "agent.completed"
+	WebhookEventAgentFailed    WebhookEvent = "agent.failed"
 )
 
 // AllocationInfo represents details about a Nomad allocation
@@ -426,5 +453,6 @@ type JobAllocations struct {
 	Build         *PhaseAllocations  `json:"build,omitempty"`
 	Test          []PhaseAllocations `json:"test,omitempty"`   // Multiple for multiple test jobs
 	Publish       *PhaseAllocations  `json:"publish,omitempty"`
+	Agent         *PhaseAllocations  `json:"agent,omitempty"`
 	HasAnyWarning bool               `json:"has_any_warning"`  // True if any phase has warning
 }

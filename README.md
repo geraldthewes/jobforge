@@ -13,6 +13,7 @@ The system enables users and coding agents to submit Docker image build jobs rem
 - **Unpushed Commits Detection**: Safety check warns before building if local commits aren't pushed
 - **Semantic Versioning**: Automatic patch incrementing with branch-aware tagging
 - **Three-Phase Build Pipeline**: Build → Test → Publish workflow orchestration
+- **Agent Jobs**: One Nomad allocation runs opencode, sourced-review, and opens a GitHub or Gitea pull request
 - **Rootless Buildah Integration**: Secure, daemonless container building
 - **Private Registry Workflow**: Intermediate image handling via private registries
 - **Consul/Vault Integration**: Configuration and secret management
@@ -47,6 +48,22 @@ The system enables users and coding agents to submit Docker image build jobs rem
                    │  Secrets    │
                    └─────────────┘
 ```
+
+## Agent jobs
+
+`kind: agent` runs a coding-agent pipeline in one unprivileged container. Build jobs stay the default when `kind` is omitted.
+
+The allocation does the steps in order: clone the repo, create a branch, run `opencode run --standalone --auto` (API keys come from the environment), commit, run `sourced-review`, and if the verdict is `Changes required` send the matching findings back to opencode. That loop stops at `review.max_iterations` (default 2). The branch is then pushed and a pull request is opened. The task prints one line:
+
+```text
+JOBFORGE_RESULT {"branch":"...","pr_url":"...","verdict":"...","iterations":1,"findings_count":0,"status":"succeeded","dockerfile_present":true}
+```
+
+Jobforge stores that result. Status moves through `AGENT_RUNNING` and `REVIEWING`, then `SUCCEEDED` or `FAILED`. When `agent.follow_up_build.enabled` is true and the pushed branch contains the configured Dockerfile, jobforge submits its normal build/test job on that branch.
+
+A sample spec is in [examples/agent-job.yaml](examples/agent-job.yaml). The container image is built from [deploy/agent/Dockerfile](deploy/agent/Dockerfile). Field-level documentation is in [docs/JobSpec.md](docs/JobSpec.md).
+
+Webhooks emit `agent.completed` and `agent.failed` in addition to the existing job events. Agent logs stored in Consul keep the head and the tail so the record stays under Consul's value size limit. `agent.timeout` (default 60m) and build/test timeouts are enforced by killing the Nomad job when the deadline passes.
 
 ## API Endpoints
 

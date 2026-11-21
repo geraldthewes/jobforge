@@ -698,15 +698,15 @@ func handleGetLogs(c *client.Client, args []string) error {
 			}
 			phase = args[i+1]
 			// Validate phase value
-			if phase != "build" && phase != "test" && phase != "publish" {
-				return fmt.Errorf("invalid phase: %s (must be build, test, or publish)", phase)
+			if phase != "build" && phase != "test" && phase != "publish" && phase != "agent" {
+				return fmt.Errorf("invalid phase: %s (must be build, test, publish, or agent)", phase)
 			}
 			i += 2
 		} else if strings.HasPrefix(arg, "--phase=") {
 			phase = strings.TrimPrefix(arg, "--phase=")
 			// Validate phase value
-			if phase != "build" && phase != "test" && phase != "publish" {
-				return fmt.Errorf("invalid phase: %s (must be build, test, or publish)", phase)
+			if phase != "build" && phase != "test" && phase != "publish" && phase != "agent" {
+				return fmt.Errorf("invalid phase: %s (must be build, test, publish, or agent)", phase)
 			}
 			i++
 		} else if !strings.HasPrefix(arg, "-") {
@@ -716,7 +716,7 @@ func handleGetLogs(c *client.Client, args []string) error {
 				i++
 			} else if phase == "" {
 				// Second non-flag argument could be positional phase (backward compatibility)
-				if arg == "build" || arg == "test" || arg == "publish" {
+				if arg == "build" || arg == "test" || arg == "publish" || arg == "agent" {
 					phase = arg
 				}
 				i++

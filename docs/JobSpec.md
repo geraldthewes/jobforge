@@ -6,9 +6,17 @@ This document describes the complete job configuration schema for the Nomad Buil
 
 Job configurations can be provided in either **JSON** or **YAML** format. The CLI tool supports YAML with a two-file approach (global + per-build), while the JSON-RPC APIs accept either format.
 
+## Job kind
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `kind` | string | `build` | `build` runs the build/test/publish pipeline. `agent` runs the coding-agent pipeline. |
+
+Build jobs use the required fields below. Agent jobs require `owner`, `repo_url`, `git_ref`, `agent`, `review`, and `output` instead of `dockerfile_path`, `image_name`, and `registry_url`.
+
 ## Required Fields
 
-These fields **must** be provided in every job configuration:
+These fields **must** be provided in every **build** job:
 
 | Field | Type | Description | Example |
 |-------|------|-------------|---------|
@@ -614,6 +622,89 @@ Webhooks are sent for these events (configurable via `webhook_on_success`/`webho
 - Failed webhooks are retried up to 3 times
 - Exponential backoff between retries (1s, 2s, 3s)
 - 30-second timeout per request
+
+## Agent jobs
+
+An agent job is one Nomad batch allocation. The container is unprivileged (`privileged: false`) and does not mount a Docker socket. Tests the agent runs must not need Docker.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent.task` | string | - | Task text. Set this or `agent.task_path`, not both. |
+| `agent.task_path` | string | - | Path inside the repo whose contents are the task. |
+| `agent.image` | string | - | Agent image. See `deploy/agent/Dockerfile`. |
+| `agent.cli` | string | `opencode` | Built-in command is opencode. Another CLI requires `agent.command_template`. |
+| `agent.model` | string | - | Passed as `opencode run --model`. |
+| `agent.command_template` | string | - | Shell command (`bash -c`) that replaces the implement step. `$TASK_FILE`, `$REPO`, and `$AGENT_MODEL` are set. |
+| `agent.vault_policies` | array[string] | - | Nomad Vault policies for the agent task. Required when `agent.vault_secrets` is set. |
+| `agent.vault_secrets` | array[VaultSecret] | - | LLM keys and git tokens, injected as environment variables. |
+| `agent.timeout` | duration | `60m` | Overall deadline. The monitor kills the job when it passes. |
+| `agent.step_timeout` | duration | `20m` | Per-step `timeout` around clone, opencode, review, push, and the pull-request call. |
+| `agent.resource_limits` | object | 2000 CPU / 4096 MB / 20480 MB | CPU MHz, memory MB, disk MB. |
+| `agent.follow_up_build.enabled` | bool | `false` | After a successful agent run, submit a build job on the pushed branch. |
+| `agent.follow_up_build.dockerfile_path` | string | `Dockerfile` | Skipped when this file is absent from the checkout. |
+| `agent.follow_up_build.image_name` | string | - | Required when follow-up is enabled. |
+| `agent.follow_up_build.registry_url` | string | - | Required when follow-up is enabled. |
+| `agent.follow_up_build.image_tags` | array[string] | job id | Tags for the follow-up build. |
+| `agent.follow_up_build.test` | TestConfig | - | Test phase of the follow-up build. |
+| `review.connection.provider` | string | - | `anthropic`, `openai`, or `bedrock`. |
+| `review.connection.model` | string | - | Model passed to `sourced-review configure`. |
+| `review.connection.credential_env` | string | - | Environment variable that holds the review credential. |
+| `review.connection.base_url` | string | - | Optional provider base URL. |
+| `review.base` | string | - | Documented review base. The runner uses `output.base_branch`. |
+| `review.check` | string | `local` | Passed to `sourced-review run --check`. |
+| `review.max_iterations` | int | `2` | Review/fix rounds. |
+| `review.on_insufficient_evidence` | string | `fail` | `fail` stops the job. `warn` pushes anyway. |
+| `review.fix_on.dispositions` | array[string] | `["confirmed"]` | Dispositions sent back to the agent. |
+| `review.fix_on.severities` | array[string] | `["critical","high"]` | Severities that qualify a finding. |
+| `review.fix_on.blocks_merge` | bool | `true` | Also qualify findings with `blocks_merge: true`. |
+| `review.concurrency` | int | - | Exported as `SOURCED_REVIEW_CONCURRENCY`. Not passed as a CLI flag. |
+| `review.max_output_tokens` | int | - | Exported as `SOURCED_REVIEW_MAX_OUTPUT_TOKENS`. Not passed as a CLI flag. |
+| `review.catalog_root` | string | `/opt/sourced-review/catalog` | `sourced-review configure --catalog-root`. |
+| `output.provider` | string | - | `github` or `gitea`. |
+| `output.api_url` | string | `https://api.github.com` | Required for Gitea (server root, for example `https://gitea.example.com`). |
+| `output.branch_prefix` | string | `agent/` | Prefix for `agent/jobforge-<id>`. |
+| `output.base_branch` | string | `git_ref` | Pull request base. |
+| `output.open_pr` | bool | `true` | Open a pull request after pushing. |
+| `output.token_env` | string | `GH_TOKEN` or `GITEA_TOKEN` | Environment variable that holds the git token. |
+
+The runner decides the review outcome from the JSON `verdict`, not the process exit code. `Ready` and `Ready with warnings` stop the loop. `Changes required` extracts confirmed findings that block merge or are critical/high (see `fix_on`) and asks opencode to fix them or explain the exception in `fix-notes.md`. `Insufficient evidence` fails or warns according to `on_insufficient_evidence`.
+
+Before opencode edits the tree, the runner executes `sourced-review catalog trust --repo /work/repo` on the clean checkout, sets `XDG_DATA_HOME=/alloc/sr`, and adds `knowledge/reviews/` to `.git/info/exclude`.
+
+Pull requests are opened with the host REST API (`Authorization: Bearer` for GitHub, `Authorization: token` for Gitea). `gh` and `tea` are installed in the agent image for operators; the runner itself uses `curl` so the call matches the tested `internal/githost` helper.
+
+Opencode is invoked as `opencode run --standalone --auto`, with `--model` when `agent.model` is set and `--file` pointing at the task. `--standalone` makes the private server see the task's provider API key. `--auto` approves permissions that are not explicitly denied, which a headless run needs in order to edit files. Provider keys are ordinary environment variables such as `ANTHROPIC_API_KEY`.
+
+Statuses added for this pipeline are `AGENT_RUNNING` and `REVIEWING`. The stored result has `branch`, `pr_url`, `verdict`, `iterations`, `findings_count`, and `status`. Webhook events are `agent.completed` and `agent.failed`.
+
+```yaml
+kind: agent
+owner: factory
+repo_url: https://github.com/example/service.git
+git_ref: main
+agent:
+  task: "Add a health endpoint and unit tests."
+  image: registry.cluster:5000/jobforge-agent:latest
+  timeout: 60m
+  vault_policies: ["nomad-agent"]
+  vault_secrets:
+    - path: secret/data/llm
+      fields:
+        api_key: ANTHROPIC_API_KEY
+    - path: secret/data/github
+      fields:
+        token: GH_TOKEN
+review:
+  connection:
+    provider: anthropic
+    model: claude-sonnet-4-5
+    credential_env: ANTHROPIC_API_KEY
+output:
+  provider: github
+  base_branch: main
+```
+
+For Gitea, set `output.provider: gitea` and `output.api_url` to the server root. Map the token into `GITEA_TOKEN` (the default `output.token_env`).
 
 ## Complete Examples
 

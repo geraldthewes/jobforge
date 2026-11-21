@@ -64,7 +64,7 @@ func TestBuildWorkflow(t *testing.T) {
 	if err != nil {
 		result.Error = fmt.Sprintf("Service discovery failed: %v", err)
 		saveTestResult(t, resultsDir, result)
-		t.Fatalf("Failed to discover service: %v", err)
+		t.Skipf("nomad-build-service is not reachable via Consul: %v", err)
 	}
 	t.Logf("Discovered service at: %s", serviceURL)
 
@@ -286,7 +286,7 @@ func TestBuildWorkflowWithEnv(t *testing.T) {
 	if err != nil {
 		result.Error = fmt.Sprintf("Service discovery failed: %v", err)
 		saveTestResult(t, resultsDir, result)
-		t.Fatalf("Failed to discover service: %v", err)
+		t.Skipf("nomad-build-service is not reachable via Consul: %v", err)
 	}
 	t.Logf("Discovered service at: %s", serviceURL)
 
@@ -462,7 +462,7 @@ func TestBuildWorkflowNoTests(t *testing.T) {
 	if err != nil {
 		result.Error = fmt.Sprintf("Service discovery failed: %v", err)
 		saveTestResult(t, resultsDir, result)
-		t.Fatalf("Failed to discover service: %v", err)
+		t.Skipf("nomad-build-service is not reachable via Consul: %v", err)
 	}
 	t.Logf("Discovered service at: %s", serviceURL)
 
@@ -658,7 +658,7 @@ func TestBuildWorkflowGPU(t *testing.T) {
 	if err != nil {
 		result.Error = fmt.Sprintf("Service discovery failed: %v", err)
 		saveTestResult(t, resultsDir, result)
-		t.Fatalf("Failed to discover service: %v", err)
+		t.Skipf("nomad-build-service is not reachable via Consul: %v", err)
 	}
 	t.Logf("Discovered service at: %s", serviceURL)
 
@@ -901,7 +901,7 @@ func TestWebhookNotifications(t *testing.T) {
 	t.Log("Discovering nomad-build-service via Consul...")
 	serviceURL, err := discoverServiceURL()
 	if err != nil {
-		t.Fatalf("Failed to discover service: %v", err)
+		t.Skipf("nomad-build-service is not reachable via Consul: %v", err)
 	}
 	t.Logf("Discovered service at: %s", serviceURL)
 
@@ -1057,6 +1057,7 @@ func discoverServiceURL() (string, error) {
 		config.Address = "10.0.1.12:8500" // Default to cluster address
 	}
 
+	config.HttpClient = &http.Client{Timeout: 5 * time.Second}
 	client, err := consulapi.NewClient(config)
 	if err != nil {
 		return "", fmt.Errorf("failed to create Consul client: %w", err)
